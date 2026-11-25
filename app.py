@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / 'web'
 sys.path.insert(0, str(ROOT))
 import serial_bridge
+import ai_tuner
 
 mimetypes.add_type('application/javascript; charset=utf-8', '.js')
 mimetypes.add_type('application/javascript; charset=utf-8', '.mjs')
@@ -42,7 +43,7 @@ class AppServer(ThreadingHTTPServer):
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = 'TC264TunePro/1.0'
+    server_version = 'TC264TunePro/1.1'
 
     def log_message(self, fmt, *args):
         pass
@@ -92,9 +93,11 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            path = urllib.parse.urlsplit(self.path).path
+            parsed = urllib.parse.urlsplit(self.path)
+            path = parsed.path
+            qs = urllib.parse.parse_qs(parsed.query)
             if path == '/api/health':
-                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.0', 'demo': DEMO_MODE})
+                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.1', 'demo': DEMO_MODE, 'ai_tuner': True})
             if path == '/api/serial/ports':
                 return self._send_json({
                     'ports': serial_bridge.list_serial_ports(include_demo=True, demo_first=DEMO_MODE),
@@ -105,6 +108,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self._send_json(serial_bridge.BRIDGE.status())
             if path == '/api/serial/stream':
                 return self._stream_sse()
+            if path == '/api/ai/snapshot':
+                loop_id = (qs.get('loop') or [None])[0]
+                dry_mode = ((qs.get('dry') or ['0'])[0] in ('1', 'true', 'yes'))
+                return self._send_json(ai_tuner.AI_TUNER.snapshot(loop_id=loop_id, dry_mode=dry_mode))
+            if path == '/api/ai/status':
+                return self._send_json(ai_tuner.AI_TUNER.status())
             rel = urllib.parse.unquote(path.lstrip('/') or 'index.html')
             target = (WEB_DIR / rel).resolve()
             if not target.is_relative_to(WEB_DIR.resolve()) or not target.is_file():
@@ -136,6 +145,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     bool(body.get('auto_log', True)),
                 ))
             if path == '/api/serial/disconnect':
+                ai_tuner.AI_TUNER.stop(estop=False)
                 return self._send_json(serial_bridge.BRIDGE.disconnect())
             if path == '/api/serial/send':
                 if 'b64' in body:
@@ -149,10 +159,41 @@ class AppHandler(BaseHTTPRequestHandler):
                     urgent=bool(body.get('urgent', False)),
                 )
                 return self._send_json({'ok': True, 'written': n})
+            if path == '/api/ai/start':
+                return self._send_json(ai_tuner.AI_TUNER.start_auto_tune(body))
+            if path == '/api/ai/stop':
+                return self._send_json(ai_tuner.AI_TUNER.stop(estop=bool(body.get('estop', True))))
+            if path == '/api/ai/estop':
+                return self._send_json(ai_tuner.AI_TUNER.stop(estop=True))
+            if path == '/api/ai/step-test':
+                return self._send_json(ai_tuner.AI_TUNER.run_one_step(
+                    loop_id=str(body.get('loop') or 'yaw_2s1p'),
+                    target=int(body['target']) if body.get('target') is not None else None,
+                    low=int(body['low']) if body.get('low') is not None else None,
+                    dry_mode=bool(body.get('dry_mode', False)),
+                    allow_real_car=bool(body.get('allow_real_car', False)),
+                    confirm_wheels_off_ground=bool(body.get('confirm_wheels_off_ground', False)),
+                ))
+            if path == '/api/ai/apply':
+                return self._send_json(ai_tuner.AI_TUNER.apply_bounded(
+                    loop_id=str(body.get('loop') or 'yaw_2s1p'),
+                    proposed=dict(body.get('parameters') or {}),
+                    dry_mode=bool(body.get('dry_mode', False)),
+                    allow_real_car=bool(body.get('allow_real_car', False)),
+                    confirm_wheels_off_ground=bool(body.get('confirm_wheels_off_ground', False)),
+                    strict=bool(body.get('strict', True)),
+                ))
+            if path == '/api/ai/rollback':
+                return self._send_json(ai_tuner.AI_TUNER.rollback_to_best(
+                    allow_real_car=bool(body.get('allow_real_car', False)),
+                    confirm_wheels_off_ground=bool(body.get('confirm_wheels_off_ground', False)),
+                ))
             return self._send_json({'error': '未知接口'}, 404)
+        except PermissionError as exc:
+            self._send_json({'error': str(exc)}, 403)
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             self._send_json({'error': str(exc)}, 400)
-        except (PermissionError, FileNotFoundError, ConnectionError, OSError) as exc:
+        except (FileNotFoundError, ConnectionError, RuntimeError, TimeoutError, OSError) as exc:
             self._send_json({'error': str(exc)}, 409)
         except Exception as exc:
             self._send_json({'error': str(exc)[:300]}, 500)
@@ -230,6 +271,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        ai_tuner.AI_TUNER.stop(estop=True)
         serial_bridge.BRIDGE.disconnect()
         httpd.server_close()
 

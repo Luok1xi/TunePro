@@ -25,6 +25,9 @@
           <button type="button" data-topology-btn="2s1p" aria-pressed="true" title="转向：视觉外环→陀螺角速度直出PWM；纵向：均速环并联叠加">两串一并 2S1P</button>
           <button type="button" data-topology-btn="3cascade" aria-pressed="false" title="传统三级串级：视觉外环→角速度中环→左右轮速内环">传统三串</button>
         </div>
+        <button type="button" class="tp-ai-toggle" data-ai-toggle aria-expanded="false" title="打开 / 收起 AI 自动调参面板">
+          <span class="tp-ai-dot" data-ai-dot></span>AI 自动调参
+        </button>
         <div class="tp-pill-group" role="group" aria-label="外观与动效">
           <button type="button" data-theme-toggle>切换浅色</button>
           <button type="button" data-motion-btn="standard" aria-pressed="true">标准动效</button>
@@ -97,6 +100,9 @@
 
     <!-- 活的控制环路舞台 + 调参控制台 -->
     <div data-tune-pro></div>
+
+    <!-- AI 自动调参工作台面板（默认折叠，点击顶栏按钮展开） -->
+    <section data-ai-tuner hidden></section>
 
     <!-- 中间实时区：左 50Hz 主示波器 + 右实时压缩图传 -->
     <main class="tp-live-grid">

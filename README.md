@@ -35,7 +35,20 @@
 - **115200 无线图传**：基于 `A5 5B` 分片 CRC16 协议，支持 `188×120` 二值 RLE（无线实测 8~12 FPS）、`94×60` 4-bit 灰度、`47×30` 8-bit 灰度，画面叠画中线、加权带和当前偏差位置，可存 PNG；旧的 `#B`/`#I` 单张抓图和逐飞助手 `AA 02` 图像流也能直接解码。
 - **板载高清阶跃示波器**：停车后点「取最近波形」拉车端 RAM 里的 2 ms / 4 ms 记录。多阶阶跃会自动跳过第一段静摩擦沿，对第二阶跃沿算 10→90% 上升时间、超调百分比、平台均值/峰峰值和波动次数；纵轴缩放不乱跳，支持方向键逐点读数、和上一趟虚线叠加对照、导出 CSV 和汇总 PNG。
 
-### 4. 串口桥、自动落盘与安全保护
+### 4. AI 自动调参模式 & 内置调参 Skill
+
+顶栏点 **AI 自动调参** 可展开自动整定面板，支持两种接入方式：
+
+- **网页内置闭环自动调参**（零第三方依赖）：
+  - 默认自带「**内置循证规则整定器**」，不填任何 API Key 就能离线直接跑（适合先在 `MOCK0` 虚拟小车验证，或在无网赛场直接用）；
+  - 也可切换 **OpenAI 兼容接口**（DeepSeek / 通义千问 / OpenAI / vLLM 等）、**Ollama 本地模型** 或 **Anthropic Claude**，直接用 Python 标准库 `urllib.request` 请求，密钥只驻留内存不落盘。
+  - 每轮自动发 `#X GO` 跑多阶/正反阶跃 → 拉取车端 4 ms 板载抓拍算上升时间、超调、静差、穿越次数与 PWM 饱和度 → 严格经参数限幅与单轮最大步长（`max_step`）检查后写入并回读 `@GP1` 核验；如果某一轮响应明显变差或出现振荡，会自动回滚到历史最佳稳定参数并记入避坑列表。
+  - 连物理 `COM` 口时默认锁死自动发车与写参，必须勾选「已架空车轮 / 确认 3S 电压 ≥ 11.7V」才放行；两串一并角速度环单独提供「干地限幅 (`ykp ≤ 14`)」开关。
+- **外部 Coding Agent Skill 接入**：
+  - 仓库自带 [`skills/tc264-pid-tuner/`](skills/tc264-pid-tuner/SKILL.md)（纯 Python 标准库 CLI + 控制环路语义参考），把该文件夹放到你的 Agent `skills` 目录，即可在 TunePro 运行时通过本地 HTTP API 让 Agent 自己读快照、做单步阶跃、限幅改参和回滚，也可离线分析 `./runs/*/m2-decoded.csv` 日志。
+  - 循证实验闭环、步长护栏与回滚方法借鉴自开源项目 [KINGSTON-115/llm-pid-tuner](https://github.com/KINGSTON-115/llm-pid-tuner)（MIT License，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)）。
+
+### 5. 串口桥、自动落盘与安全保护
 
 - **本机串口桥**：Windows 下直接通过 `ctypes` 调 Win32 API 读写串口并读注册表枚举 COM 口，不依赖 `pyserial`，支持无线模块拔插重连、多标签页同时看同一路数据，每趟发车到停车自动把原始 `@M2`、解码后的 `m2-decoded.csv` 和 `summary.json` 存进 `./runs/`。Chrome / Edge 也支持切到 WebSerial 直连。
 - **安全机制**：远程发车需要先勾「解锁远程发车」（急停或断联自动重新锁上）；任何时候按 `Esc` 或 `Space` 不分包直发 `#!` + `#X STOP`；远程运行期间每 400 ms 发一次 `#X PING` 心跳，断联车端看门狗自动停；所有写参数指令带 CRC-16/CCITT-FALSE 校验和 `rev` 版本号检查，防止无线丢字节写错值。
@@ -91,15 +104,18 @@ python app.py [--host 127.0.0.1] [--port 18760] [--demo] [--log-dir ./runs] [--n
 ## 目录结构
 
 ```text
-tc264-tunepro/
-├── app.py                        # 本地 HTTP/SSE 服务和独立窗口启动入口
+TunePro/
+├── app.py                        # 本地 HTTP/SSE 服务、AI 调参 API 与独立窗口启动入口
 ├── serial_bridge.py              # Win32 零依赖串口桥、SSE 广播、优先急停与自动落盘
+├── ai_tuner.py                   # AI 自动调参引擎、4ms 阶跃分析、安全护栏与回滚管理
 ├── demo_sim.py                   # 离线虚拟小车（MOCK0），含两串一并和三串仿真
 ├── 启动三环调参台.bat
 ├── 启动离线演示.bat
 ├── start.sh
 ├── docs/
 │   └── PROTOCOL.md               # 串口通信协议说明
+├── skills/
+│   └── tc264-pid-tuner/          # 外部 Agent 调参 Skill 与零依赖 CLI 工具
 ├── web/
 │   ├── index.html
 │   ├── tokens.css                # 深浅双主题配色与动效变量
@@ -107,6 +123,7 @@ tc264-tunepro/
 │   ├── main.js                   # 主控、双通道串口、主示波器与图传渲染
 │   └── lib/
 │       ├── robot-tune-pro.js     # 双拓扑调参面板、热写队列、看门狗与急停
+│       ├── robot-ai-tuner.js     # AI 自动调参工作台前端面板
 │       ├── robot-live-model.js   # 协议流解析器
 │       ├── robot-live-data.js    # 环形缓冲、共模/差模解算、滞后/振荡诊断、CSV
 │       ├── robot-live-charts.js  # Canvas 示波器
@@ -117,7 +134,9 @@ tc264-tunepro/
 ├── tests/
 │   ├── test_serial_bridge.py
 │   ├── test_demo_sim.py
+│   ├── test_ai_tuner.py
 │   └── test_tunepro.mjs
+├── THIRD_PARTY_NOTICES.md
 └── LICENSE
 ```
 
@@ -136,8 +155,8 @@ node --test tests/test_tunepro.mjs
 
 ## 后续计划
 
-- 接入 AI 调参（内置调参 Skill，结合实时遥测和阶跃指标给出调参建议与受控闭环整定）
-- 补全更多车端 MCU（TC264 / STM32 等）的最小协议对接示例
+- 补全更多车端 MCU（TC264 / STM32 / RT1064 等）的最小协议对接示例
+- 增加多轮阶跃历史曲线叠加导出与外环实测轨迹对比
 
 ## License
 

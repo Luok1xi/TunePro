@@ -5,6 +5,7 @@ import { createStore, createIngest, tracking, saturation, crossings, toCSV, pars
 import { createChart } from './lib/robot-live-charts.js';
 import { mountSpeedScope } from './lib/robot-speed-scope.js';
 import { mountTunePro } from './lib/robot-tune-pro.js';
+import { mountAiTuner } from './lib/robot-ai-tuner.js';
 
 const $ = q => document.querySelector(q), $$ = q => document.querySelectorAll(q);
 const W = 188, H = 120, BAND = [50, 69];
@@ -154,8 +155,21 @@ const tunePro = mountTunePro($('[data-tune-pro]'), {
   sendRaw,
   initialTopology: currentTopo,
   onLog: addLog,
-  onTopologyChange: topo => applyTopologyChrome(topo),
+  onTopologyChange: topo => { applyTopologyChrome(topo); aiTuner.setTopology(topo); },
   onFocusLoop: tab => setPlotView(tab === 'outer' ? 'outer' : tab === 'yaw' ? 'yaw' : 'speed'),
+});
+
+const aiTuner = mountAiTuner($('[data-ai-tuner]'), {
+  getTransport: () => transport,
+  isConnected,
+  onLog: addLog,
+  onFocusView: view => setPlotView(view),
+  onStateBadge: ({ active, open }) => {
+    const btn = $('[data-ai-toggle]');
+    if (!btn) return;
+    btn.dataset.running = String(Boolean(active));
+    if (typeof open === 'boolean') btn.setAttribute('aria-expanded', String(open));
+  },
 });
 
 if (!hasWebSerial) $('[data-transport] option[value="webserial"]').disabled = true;
@@ -264,6 +278,7 @@ function attachSSE(st) {
   setConnUI(true, `已连 ${st.port} (${st.baud})`);
   addLog('event', `本机串口桥已连接 ${st.port} · ${st.baud}`);
   tunePro.onConnected();
+  aiTuner.onConnected();
 }
 
 async function connect() {
@@ -323,6 +338,7 @@ async function disconnect() {
   wsPort = wsReader = wsWriter = null;
   parse.end();
   tunePro.onDisconnected();
+  aiTuner.onDisconnected();
   setConnUI(false, '未连接');
 }
 
@@ -454,7 +470,15 @@ $$('[data-topology-btn]').forEach(b => b.addEventListener('click', () => {
   const next = b.dataset.topologyBtn;
   applyTopologyChrome(next);
   tunePro.setTopology(next, { sendToCar: true });
+  aiTuner.setTopology(next);
 }));
+$('[data-ai-toggle]').addEventListener('click', () => {
+  aiTuner.toggle();
+  $('[data-ai-toggle]').setAttribute('aria-expanded', String(aiTuner.isOpen()));
+});
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') aiTuner.onEmergencyStop();
+});
 
 $('[data-transport]').addEventListener('change', e => {
   transport = e.target.value;

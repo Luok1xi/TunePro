@@ -72,8 +72,8 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
         <p class="ait-sub">基于 4 ms 板载阶跃与有界安全护栏自动迭代整定 · 劣化自动回滚至历史最佳稳定参数</p>
       </div>
       <div class="ait-head-actions">
-        <button type="button" data-ait-refresh>刷新快照</button>
-        <button type="button" data-ait-close>收起面板</button>
+        <button type="button" data-ait-refresh>刷新</button>
+        <button type="button" data-ait-close>切回手动</button>
       </div>
     </div>
 

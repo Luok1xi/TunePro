@@ -29,9 +29,11 @@ const PRO_ERRORS = {
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function fmt(v, d = 2) { return Number.isFinite(v) ? v.toFixed(d) : '—'; }
 
-export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, onTopologyChange, initialTopology = '2s1p', onResetLegacy }) {
+export function mountTunePro(host, { stageHost = null, camStreamHost = null, isConnected, sendRaw, onLog, onFocusLoop, onTopologyChange, initialTopology = '2s1p', onResetLegacy }) {
   const ac = new AbortController(), on = (el, ev, fn, opt) => el.addEventListener(ev, fn, { signal: ac.signal, ...opt });
-  const $ = q => host.querySelector(q), $$ = q => host.querySelectorAll(q);
+  const roots = [host, stageHost, camStreamHost].filter(Boolean);
+  const $ = q => { for (const r of roots) { const el = r.querySelector(q); if (el) return el; } return null; };
+  const $$ = q => roots.flatMap(r => [...r.querySelectorAll(q)]);
 
   let topology = initialTopology === '3cascade' ? '3cascade' : '2s1p';
   let activeTab = 'speed';
@@ -58,17 +60,35 @@ export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, o
   host.dataset.activeLoop = activeTab;
   host.dataset.running = 'false';
 
-  host.innerHTML = `
-    <!-- 1. 实时控制拓扑示意图 -->
+  const stageHTML = `
     <div class="rtp-stage" data-rtp-stage>
       <div class="rtp-stage-head">
-        <span class="rtp-stage-title" data-stage-title>控制拓扑舞台 · 两串一并（2S1P）</span>
-        <span class="rtp-stage-desc" data-stage-desc>转向支路直出 PWM 绕开轮速滞后 · 纵向均速环在 PWM 端并联叠加</span>
+        <span class="rtp-stage-title" data-stage-title>控制拓扑 · 两串一并（2S1P）</span>
+        <span class="rtp-stage-desc" data-stage-desc>转向直出 PWM 绕开轮速滞后 · 纵向均速环并联叠加</span>
       </div>
       <div class="rtp-flow" data-stage-flow></div>
-    </div>
+    </div>`;
 
-    <!-- 2. 安全状态栏与发车/急停 -->
+  const imgBarHTML = `
+    <div class="rtp-img-bar" aria-label="实时压缩图传">
+      <div class="rl-seg" role="group">
+        <button type="button" data-rtp-img="0" aria-pressed="true" disabled>关</button>
+        <button type="button" data-rtp-img="1" aria-pressed="false" disabled title="188×120 二值图 RLE 压缩，115200 无线可达 8~12 FPS">二值 RLE</button>
+        <button type="button" data-rtp-img="2" aria-pressed="false" disabled title="94×60 4位灰度压缩，无线约 3 FPS">灰 94×60</button>
+        <button type="button" data-rtp-img="3" aria-pressed="false" disabled title="47×30 8位灰度压缩，无线约 6 FPS">灰 47×30</button>
+      </div>
+      <select data-rtp-img-fps aria-label="图传帧率" disabled>
+        ${[2, 4, 6, 10, 15].map(f => `<option value="${f}"${f === 6 ? ' selected' : ''}>${f} fps</option>`).join('')}
+      </select>
+    </div>`;
+
+  if (stageHost) stageHost.innerHTML = stageHTML;
+  if (camStreamHost) camStreamHost.innerHTML = imgBarHTML;
+
+  host.innerHTML = `
+    ${stageHost ? '' : stageHTML}
+
+    <!-- 安全状态栏与发车/急停 -->
     <div class="rtp-safety-bar">
       <div class="rtp-status-group">
         <span class="rtp-badge" data-rtp-state data-level="idle">未连接</span>
@@ -77,45 +97,34 @@ export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, o
         <span class="rtp-badge" data-rtp-wdog data-level="idle">看门狗待命</span>
       </div>
       <div class="rtp-launch-group">
-        <button type="button" class="rtp-sync-btn" data-rtp-sync disabled>同步参数</button>
+        <button type="button" class="rtp-sync-btn" data-rtp-sync disabled>同步</button>
         <label class="rtp-arm-toggle" title="防止误触：勾选一次后即可持续一键发车/切速，急停或断联后自动上锁">
           <input type="checkbox" data-rtp-arm disabled>
-          <span>解锁远程发车</span>
+          <span>解锁发车</span>
         </label>
         <button type="button" class="rtp-go-btn" data-rtp-go disabled>远程发车</button>
-        <button type="button" class="rtp-stop-btn" data-rtp-stop disabled title="最高优先级硬件急停（快捷键 Space / Esc）">紧急停车 · Esc</button>
+        <button type="button" class="rtp-stop-btn" data-rtp-stop disabled title="最高优先级硬件急停（快捷键 Space / Esc）">急停 · Esc</button>
       </div>
     </div>
 
-    <!-- 3. 快捷命令行 -->
+    <!-- 极简底线快捷命令行 -->
     <form class="rtp-quick-bar" data-rtp-quick-form>
-      <span class="rtp-quick-tag">快捷指令</span>
+      <span class="rtp-quick-tag">CMD</span>
       <input type="text" data-rtp-quick-input disabled autocomplete="off" spellcheck="false"
-        placeholder="示例：B 140（双轮均速） · W -300（原地角速度） · vkp 38 · ykp 18 · yff 1.85 · kp 8.5 · fan 40 · s（急停）">
-      <button type="submit" class="tp-btn-accent" data-rtp-quick-send disabled>发送 ↵</button>
+        placeholder="B 140 · W -300 · vkp 38 · ykp 18 · yff 1.85 · fan 40 · s">
+      <button type="submit" class="tp-btn-subtle" data-rtp-quick-send disabled>↵</button>
     </form>
 
     <div class="rtp-banner" data-rtp-banner role="status">${esc(lastReply)}</div>
 
-    <!-- 4. 三环 Tab + 实时压缩图传控制 -->
+    <!-- 三环细线 Tab -->
     <div class="rtp-tabs-row">
       <div class="rtp-loop-tabs" role="tablist" aria-label="控制环路调参">
-        <button type="button" role="tab" data-rtp-tab="speed" aria-selected="true">① 均速并联环 · 纵向 PWM</button>
-        <button type="button" role="tab" data-rtp-tab="yaw" aria-selected="false">② 角速度串级内环 · 直出 PWM</button>
-        <button type="button" role="tab" data-rtp-tab="outer" aria-selected="false">③ 视觉外环 · 目标角速度</button>
+        <button type="button" role="tab" data-rtp-tab="speed" aria-selected="true">① 均速并联</button>
+        <button type="button" role="tab" data-rtp-tab="yaw" aria-selected="false">② 角速度直出</button>
+        <button type="button" role="tab" data-rtp-tab="outer" aria-selected="false">③ 视觉外环</button>
       </div>
-      <div class="rtp-img-bar" aria-label="实时压缩图传">
-        <span class="rtp-mini-label">实时图传</span>
-        <div class="rl-seg" role="group">
-          <button type="button" data-rtp-img="0" aria-pressed="true" disabled>关</button>
-          <button type="button" data-rtp-img="1" aria-pressed="false" disabled title="188×120 二值图 RLE 压缩，115200 无线可达 8~12 FPS">二值高速 RLE</button>
-          <button type="button" data-rtp-img="2" aria-pressed="false" disabled title="94×60 4位灰度压缩，无线约 3 FPS">灰度 94×60</button>
-          <button type="button" data-rtp-img="3" aria-pressed="false" disabled title="47×30 8位灰度压缩，无线约 6 FPS">灰度 47×30</button>
-        </div>
-        <select data-rtp-img-fps aria-label="图传帧率" disabled>
-          ${[2, 4, 6, 10, 15].map(f => `<option value="${f}"${f === 6 ? ' selected' : ''}>${f} fps</option>`).join('')}
-        </select>
-      </div>
+      ${camStreamHost ? '' : imgBarHTML}
     </div>
 
     <div class="rtp-body">
@@ -266,12 +275,16 @@ export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, o
 
   function gainRowHTML(key, label, min, max, step, defVal) {
     return `<div class="rtp-gain-row" data-gain-row="${key}">
-      <span class="rtp-g-label">${label}</span>
+      <div class="rtp-g-top">
+        <span class="rtp-g-label">${label}</span>
+        <div class="rtp-g-controls">
+          <button type="button" class="rtp-nudge" data-rtp-nudge="${key}" data-dir="-1" data-step="${step}" disabled aria-label="减小${label}">−</button>
+          <input type="number" data-rtp-num="${key}" min="${min}" max="${max}" step="${step}" value="${defVal}" disabled aria-label="${label}数值">
+          <button type="button" class="rtp-nudge" data-rtp-nudge="${key}" data-dir="1" data-step="${step}" disabled aria-label="增大${label}">+</button>
+          <button type="button" class="rtp-apply-one" data-rtp-send-gain="${key}" disabled>写入</button>
+        </div>
+      </div>
       <input type="range" data-rtp-slider="${key}" min="${min}" max="${max}" step="${step}" value="${defVal}" disabled aria-label="${label}滑条">
-      <button type="button" class="rtp-nudge" data-rtp-nudge="${key}" data-dir="-1" data-step="${step}" disabled aria-label="减小${label}">−</button>
-      <input type="number" data-rtp-num="${key}" min="${min}" max="${max}" step="${step}" value="${defVal}" disabled aria-label="${label}数值">
-      <button type="button" class="rtp-nudge" data-rtp-nudge="${key}" data-dir="1" data-step="${step}" disabled aria-label="增大${label}">+</button>
-      <button type="button" class="rtp-apply-one" data-rtp-send-gain="${key}" disabled>写入</button>
     </div>`;
   }
 
@@ -337,9 +350,9 @@ export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, o
 
   function applyTopologyUI() {
     const is2s1p = topology === '2s1p';
-    $('[data-rtp-tab="speed"]').textContent = is2s1p ? '① 均速并联环 · 纵向 PWM' : '① 速度内环 · 左右轮';
-    $('[data-rtp-tab="yaw"]').textContent = is2s1p ? '② 角速度串级内环 · 直出 PWM' : '② 角速度中环 · 输出轮差';
-    $('[data-rtp-tab="outer"]').textContent = is2s1p ? '③ 视觉外环 · 目标角速度' : '③ 视觉外环 · 位置 PD';
+    $('[data-rtp-tab="speed"]').textContent = is2s1p ? '① 均速并联' : '① 左右轮速';
+    $('[data-rtp-tab="yaw"]').textContent = is2s1p ? '② 角速度直出' : '② 角速度中环';
+    $('[data-rtp-tab="outer"]').textContent = '③ 视觉外环';
 
     $('[data-guide-speed]').innerHTML = is2s1p
       ? '<b>两串一并 · 均速支路</b>：纵向只控双轮均速 <code>0.5×(encL+encR) → PWM_speed</code>，拖动上方均速 Kp/Ki 自动同步写入双轮并热生效；需单轮硬件点检时可切「左轮 / 右轮」。'
@@ -413,6 +426,7 @@ export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, o
     const parked = conn && !running;
     const ready = conn && Boolean(params);
     host.dataset.running = String(running);
+    if (stageHost) stageHost.dataset.running = String(running);
 
     const stateEl = $('[data-rtp-state]');
     stateEl.textContent = !conn ? '未连接' : running ? (params?.step_mode === 3 ? '持续运转中' : '运行中') : stopReason ? `已停 · ${STOP_REASONS[stopReason] || '码 ' + stopReason}` : '已停稳';
@@ -785,9 +799,9 @@ export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, o
     }
   });
 
-  on(host, 'click', async e => {
+  const handleClick = async e => {
     const b = e.target.closest('button');
-    if (!b || !host.contains(b)) return;
+    if (!b || !roots.some(r => r.contains(b))) return;
     const d = b.dataset;
     if (d.jumpTab) { switchTab(d.jumpTab); return; }
     if (d.rtpTab) { switchTab(d.rtpTab); return; }
@@ -928,7 +942,17 @@ export function mountTunePro(host, { isConnected, sendRaw, onLog, onFocusLoop, o
       await sendRaw(commands.proCapture(), { paced: true });
       return;
     }
-  });
+  };
+  for (const r of roots) on(r, 'click', handleClick);
+  if (camStreamHost) {
+    on(camStreamHost, 'change', e => {
+      const t = e.target;
+      if (t.matches('[data-rtp-img-fps]') && imgMode > 0) {
+        imgFps = Number(t.value) || 6;
+        sendRaw(commands.proImg(imgMode, imgFps), { paced: true });
+      }
+    });
+  }
 
   on(host, 'input', e => {
     const t = e.target;

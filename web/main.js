@@ -6,6 +6,7 @@ import { createChart } from './lib/robot-live-charts.js';
 import { mountSpeedScope } from './lib/robot-speed-scope.js';
 import { mountTunePro } from './lib/robot-tune-pro.js';
 import { mountAiTuner } from './lib/robot-ai-tuner.js';
+import { mountOptics } from './lib/robot-optics.js';
 
 const $ = q => document.querySelector(q), $$ = q => document.querySelectorAll(q);
 const W = 188, H = 120, BAND = [50, 69];
@@ -24,7 +25,7 @@ function applyTheme(theme) {
   currentTheme = theme === 'light' ? 'light' : 'dark';
   document.documentElement.dataset.theme = currentTheme;
   localStorage.setItem(PREF_THEME, currentTheme);
-  $('[data-theme-toggle]').textContent = currentTheme === 'light' ? '切换暗色' : '切换浅色';
+  $('[data-theme-toggle]').textContent = currentTheme === 'light' ? '暗房深色' : '纸面浅色';
   dirty = true;
   window.dispatchEvent(new CustomEvent('tunepro-theme', { detail: { theme: currentTheme } }));
 }
@@ -40,7 +41,7 @@ function applyTopologyChrome(topo) {
   localStorage.setItem(PREF_TOPO, currentTopo);
   $$('[data-topology-btn]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.topologyBtn === currentTopo)));
   $('[data-topo-pill]').textContent = currentTopo === '2s1p' ? '两串一并 · 2S1P' : '传统三串 · 3-Cascade';
-  $('[data-kpi-speed-lbl]').textContent = currentTopo === '2s1p' ? '均速反馈 (v_avg)' : '左右轮速 (encL/R)';
+  $('[data-kpi-speed-lbl]').textContent = currentTopo === '2s1p' ? '均速反馈 · V_AVG' : '左右轮速 · ENC L/R';
 }
 
 // 5 种主示波器预设视图（含两串一并专属「共模/差模 PWM」）
@@ -150,13 +151,28 @@ const camCanvas = $('[data-cam-canvas]'), camOverlay = $('[data-cam-overlay]');
 const camCtx = camCanvas.getContext('2d'), ovCtx = camOverlay.getContext('2d');
 const speedScope = mountSpeedScope($('[data-speed-scope]'));
 
+let inspectorMode = 'manual';
+function setInspectorMode(mode) {
+  inspectorMode = mode === 'ai' ? 'ai' : 'manual';
+  const showAi = inspectorMode === 'ai';
+  $('[data-tune-pro]').hidden = showAi;
+  aiTuner.setOpen(showAi);
+  $$('[data-inspector-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.inspectorTab === inspectorMode)));
+  $('[data-ai-toggle]').setAttribute('aria-expanded', String(showAi));
+}
+
 const tunePro = mountTunePro($('[data-tune-pro]'), {
+  stageHost: $('[data-stage-host]'),
+  camStreamHost: $('[data-cam-stream-host]'),
   isConnected,
   sendRaw,
   initialTopology: currentTopo,
   onLog: addLog,
   onTopologyChange: topo => { applyTopologyChrome(topo); aiTuner.setTopology(topo); },
-  onFocusLoop: tab => setPlotView(tab === 'outer' ? 'outer' : tab === 'yaw' ? 'yaw' : 'speed'),
+  onFocusLoop: tab => {
+    setPlotView(tab === 'outer' ? 'outer' : tab === 'yaw' ? 'yaw' : 'speed');
+    if (inspectorMode !== 'manual') setInspectorMode('manual');
+  },
 });
 
 const aiTuner = mountAiTuner($('[data-ai-tuner]'), {
@@ -166,9 +182,17 @@ const aiTuner = mountAiTuner($('[data-ai-tuner]'), {
   onFocusView: view => setPlotView(view),
   onStateBadge: ({ active, open }) => {
     const btn = $('[data-ai-toggle]');
-    if (!btn) return;
-    btn.dataset.running = String(Boolean(active));
-    if (typeof open === 'boolean') btn.setAttribute('aria-expanded', String(open));
+    if (btn) {
+      btn.dataset.running = String(Boolean(active));
+      if (typeof open === 'boolean') btn.setAttribute('aria-expanded', String(open));
+    }
+    const dot = $('[data-inspector-ai-dot]');
+    if (dot) dot.hidden = !active;
+    if (open === false && inspectorMode === 'ai') {
+      inspectorMode = 'manual';
+      $('[data-tune-pro]').hidden = false;
+      $$('[data-inspector-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.inspectorTab === 'manual')));
+    }
   },
 });
 
@@ -430,35 +454,49 @@ function updateKPIStrip(kbs) {
   const errPx = store.last('image_error')?.v, routeK = store.last('route_k')?.v;
   const vbat = tunePro.getVbatMv();
 
+  function setMeter(name, ratio, hot = false) {
+    const el = $(`[data-kpi-meter="${name}"]`);
+    if (!el) return;
+    const clamped = Number.isFinite(ratio) ? Math.max(-1, Math.min(1, ratio)) : 0;
+    el.style.setProperty('--m', clamped.toFixed(3));
+    el.dataset.hot = String(Boolean(hot));
+  }
+
   $('[data-kpi-speed]').textContent = Number.isFinite(spd) ? `${spd.toFixed(1)}` : '—';
   $('[data-kpi-speed-sub]').textContent = Number.isFinite(encL) && Number.isFinite(encR)
     ? `左 ${Math.round(encL)} · 右 ${Math.round(encR)} cnt/2ms` : '左 — · 右 — cnt/2ms';
+  setMeter('speed', Number.isFinite(spd) ? Math.abs(spd) / 260 : 0, Math.abs(spd || 0) > 220);
 
   $('[data-kpi-gyro]').textContent = Number.isFinite(gyro) ? `${gyro >= 0 ? '+' : ''}${gyro.toFixed(1)} °/s` : '—';
   $('[data-kpi-gyro-sub]').textContent = Number.isFinite(yawTgt) ? `目标 ${yawTgt >= 0 ? '+' : ''}${yawTgt.toFixed(0)} °/s` : '目标 — °/s';
+  setMeter('gyro', Number.isFinite(gyro) ? gyro / 600 : 0, Math.abs(gyro || 0) > 380);
 
   $('[data-kpi-pwm]').textContent = Number.isFinite(pwmCm) && Number.isFinite(pwmDm)
     ? `${Math.round(pwmCm)} / ${Math.round(pwmDm)}` : '—';
   $('[data-kpi-pwm-sub]').textContent = Number.isFinite(pwmL) && Number.isFinite(pwmR)
     ? `左 ${Math.round(pwmL)} · 右 ${Math.round(pwmR)}` : '纵向 — · 转向 —';
+  const maxPwmRatio = Math.max(Math.abs(pwmL || 0), Math.abs(pwmR || 0)) / PWM_LIMIT;
+  setMeter('pwm', Number.isFinite(maxPwmRatio) ? maxPwmRatio : 0, maxPwmRatio > 0.85);
 
   $('[data-kpi-vis]').textContent = Number.isFinite(errPx) ? `${errPx >= 0 ? '+' : ''}${errPx.toFixed(0)} px` : '—';
   const fps = frameTimes.length >= 2 ? ((frameTimes.length - 1) * 1000 / Math.max(1, frameTimes.at(-1) - frameTimes[0])).toFixed(1) : null;
   $('[data-kpi-vis-sub]').textContent = `k = ${Number.isFinite(routeK) ? Math.round(routeK) : '—'} · ${fps ? `${fps} fps` : '等待图传'}`;
+  setMeter('vis', Number.isFinite(errPx) ? errPx / 70 : 0, Math.abs(errPx || 0) > 35);
 
   const batEl = $('[data-kpi-bat]');
   if (Number.isFinite(vbat) && vbat >= VBAT_USB) {
     batEl.textContent = `${(vbat / 1000).toFixed(2)} V`;
     batEl.dataset.level = vbat < 10500 ? 'bad' : vbat < VBAT_COMP_MIN ? 'warn' : 'good';
+    setMeter('bat', (vbat - 10500) / 2100, vbat < VBAT_COMP_MIN);
   } else if (Number.isFinite(vbat) && vbat > 0) {
     batEl.textContent = 'USB';
     batEl.dataset.level = 'warn';
+    setMeter('bat', 0.25, true);
   } else {
     batEl.textContent = '—';
     batEl.dataset.level = 'idle';
+    setMeter('bat', 0, false);
   }
-  $('[data-kpi-bat-sub]').textContent = ingest.ctx.source
-    ? `${ingest.ctx.rate.toFixed(0)} Hz · ${kbs.toFixed(1)} KB/s` : '未连接';
 
   tunePro.updateTelemetry({ spd, encL, encR, gyro, yawTgt, errPx, pwmCm, pwmDm, pwmL, pwmR });
 }
@@ -473,8 +511,16 @@ $$('[data-topology-btn]').forEach(b => b.addEventListener('click', () => {
   aiTuner.setTopology(next);
 }));
 $('[data-ai-toggle]').addEventListener('click', () => {
-  aiTuner.toggle();
-  $('[data-ai-toggle]').setAttribute('aria-expanded', String(aiTuner.isOpen()));
+  setInspectorMode(inspectorMode === 'ai' ? 'manual' : 'ai');
+});
+$$('[data-inspector-tab]').forEach(b => b.addEventListener('click', () => setInspectorMode(b.dataset.inspectorTab)));
+$('[data-inspector-expand]').addEventListener('click', e => {
+  const ws = $('[data-workspace]');
+  const next = ws.dataset.wideInspector !== 'true';
+  ws.dataset.wideInspector = String(next);
+  e.currentTarget.setAttribute('aria-pressed', String(next));
+  e.currentTarget.textContent = next ? '收窄' : '展宽';
+  setTimeout(() => { dirty = true; }, 320);
 });
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape') aiTuner.onEmergencyStop();
@@ -570,5 +616,6 @@ applyMotion(currentMotion);
 applyTopologyChrome(currentTopo);
 setPlotView('speed');
 refreshPorts();
+mountOptics(document);
 try { new EventSource('/api/app/lifecycle'); } catch {}
 requestAnimationFrame(tick);

@@ -117,12 +117,16 @@ TunePro/
 │   └── PROTOCOL.md               # 串口通信协议说明
 ├── skills/
 │   └── tc264-pid-tuner/          # 外部 Agent 调参 Skill 与零依赖 CLI 工具
+├── scripts/
+│   ├── build_exe.py              # 一键打包独立单文件 TunePro.exe
+│   └── make_icon.py              # 零依赖生成应用图标 assets/tunepro.ico
 ├── web/
 │   ├── index.html
-│   ├── tokens.css                # 深浅双主题配色与动效变量
+│   ├── tokens.css                # 光学玻璃与深浅双主题设计变量
 │   ├── app.css
 │   ├── main.js                   # 主控、双通道串口、主示波器与图传渲染
 │   └── lib/
+│       ├── robot-optics.js       # 物理折射高光与玻璃镜面交互
 │       ├── robot-tune-pro.js     # 双拓扑调参面板、热写队列、看门狗与急停
 │       ├── robot-ai-tuner.js     # AI 自动调参工作台前端面板
 │       ├── robot-live-model.js   # 协议流解析器

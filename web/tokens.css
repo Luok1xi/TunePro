@@ -1,170 +1,212 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* =====================================================================
-   TunePro Studio · Design Tokens (Warm Obsidian Dark & Parchment Light)
-   Zero external font or library dependencies.
+   TunePro Optical Glass & Minimal Geometry Design Tokens
+   Fuses physical frosted-glass light optics with archival paper/obsidian
+   editorial typography. Zero external font or library dependencies.
    ===================================================================== */
 
 :root {
   color-scheme: dark;
 
-  /* ---------- Typography ---------- */
+  /* ---------- Typography (3 roles: Serif display, Sans UI, Mono telemetry) ---------- */
   --font-sans: "Noto Sans SC", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", system-ui, -apple-system, sans-serif;
   --font-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "Georgia", serif;
-  --font-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", "Consolas", ui-monospace, monospace;
-  --text-2xs: 10.5px;
+  --font-display: "Georgia", "Times New Roman", "Noto Serif SC", "Songti SC", serif;
+  --font-mono: "SF Mono", "Cascadia Code", "JetBrains Mono", "Consolas", ui-monospace, monospace;
+
+  --text-2xs: 10px;
   --text-xs: 11.5px;
   --text-sm: 12.5px;
   --text-md: 13.5px;
   --text-lg: 16px;
-  --text-display: clamp(22px, 2.2vw, 28px);
-  --tracking-ui: -0.005em;
-  --tracking-display: -0.02em;
-  --tracking-kicker: 0.14em;
+  --tracking-label: 0.16em;
+  --tracking-tight: -0.02em;
 
-  /* ---------- Warm Obsidian Dark Neutrals (default) ---------- */
-  --c-bg: #1f1e1c;
-  --c-bg-sunken: #171614;
-  --c-surface: #262523;
-  --c-surface-2: #2e2d2a;
-  --c-surface-3: #383733;
-  --c-line: rgba(240, 238, 230, 0.08);
-  --c-line-strong: rgba(240, 238, 230, 0.15);
-  --c-fg: #ecebe6;
-  --c-fg-muted: #a8a59c;
-  --c-fg-dim: #75736c;
+  /* ---------- Obsidian Darkroom Palette (Default) ---------- */
+  --c-bg: #101012;
+  --c-bg-alt: #161619;
+  --c-bg-sunken: #0b0b0d;
+  --c-surface: #1b1b1f;
+  --c-surface-2: #232328;
+  --c-surface-3: #2c2c33;
 
-  /* ---------- Studio Signature Spectrum ---------- */
-  --c-accent: #d97757;                  /* Studio terracotta clay */
-  --c-accent-strong: #e38667;
-  --c-accent-soft: rgba(217, 119, 87, 0.16);
-  --c-accent-border: rgba(217, 119, 87, 0.42);
-  --c-emerald: #4fc3a1;
-  --c-emerald-soft: rgba(79, 195, 161, 0.14);
-  --c-cobalt: #6ea1ff;
-  --c-cobalt-soft: rgba(110, 161, 255, 0.14);
-  --c-indigo: #8b8cff;
-  --c-amber: #e2b259;
-  --c-amber-soft: rgba(226, 178, 89, 0.15);
-  --c-err: #e56b5d;
-  --c-err-soft: rgba(229, 107, 93, 0.16);
-  --c-estop-top: #cf3d35;
-  --c-estop-bot: #9d2420;
+  --c-fg: #f2f1ed;
+  --c-fg-muted: #9f9d96;
+  --c-fg-dim: #686660;
+  --c-on-ink: #111113;
 
-  /* ---------- Ambient Loop Glows ---------- */
-  --mood-speed: rgba(79, 195, 161, 0.18);
-  --mood-yaw: rgba(217, 119, 87, 0.20);
-  --mood-outer: rgba(110, 161, 255, 0.18);
-  --mood-aux: rgba(139, 140, 255, 0.12);
+  /* Hairline Architectural Rules */
+  --c-rule: rgba(242, 241, 237, 0.56);
+  --c-line: rgba(242, 241, 237, 0.10);
+  --c-line-strong: rgba(242, 241, 237, 0.18);
+  --c-fill: rgba(242, 241, 237, 0.055);
+  --c-fill-2: rgba(242, 241, 237, 0.105);
 
-  /* ---------- Oscilloscope & Chart Palette (read by Canvas) ---------- */
-  --rl-c1: #4fc3a1;   /* Emerald: primary feedback / L / CM PWM */
-  --rl-c2: #d97757;   /* Clay: gyro / DM PWM */
-  --rl-c3: #e2b259;   /* Warm Amber: target reference */
-  --rl-c4: #6ea1ff;   /* Cobalt: secondary wheel R */
-  --rl-c5: #e56b5d;   /* Coral: PWM / saturation */
-  --rl-c6: #8b8cff;   /* Indigo: R target */
-  --rl-grid: rgba(240, 238, 230, 0.085);
-  --rl-axis: #8a877f;
-  --rl-good: #4fc3a1;
-  --rl-warn: #e2b259;
-  --rl-bad: #e56b5d;
-  --rl-idle: #75736c;
+  /* Physical Frosted Glass Optics (Dark) */
+  --glass-bg: rgba(26, 26, 31, 0.62);
+  --glass-bg-strong: rgba(24, 24, 29, 0.78);
+  --glass-nav: rgba(16, 16, 18, 0.74);
+  --glass-blur: blur(26px) saturate(180%);
+  --glass-rim-top: rgba(255, 255, 255, 0.19);
+  --glass-rim-edge: rgba(255, 255, 255, 0.09);
+  --glass-sheen: rgba(255, 255, 255, 0.075);
+  --glass-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.68), 0 4px 14px -4px rgba(0, 0, 0, 0.36);
+
+  /* Disciplined Accent Economy: Vermilion Signal + Precision Blue + Status Emerald */
+  --c-accent: #e46b3e;
+  --c-accent-strong: #f07e54;
+  --c-accent-soft: rgba(228, 107, 62, 0.15);
+  --c-accent-border: rgba(228, 107, 62, 0.42);
+  --c-cobalt: #6aaeff;
+  --c-cobalt-soft: rgba(106, 174, 255, 0.14);
+  --c-emerald: #3fd08b;
+  --c-emerald-soft: rgba(63, 208, 139, 0.14);
+  --c-amber: #ebb856;
+  --c-amber-soft: rgba(235, 184, 86, 0.15);
+  --c-err: #f0655c;
+  --c-err-soft: rgba(240, 101, 92, 0.16);
+  --c-indigo: #9b95ff;
+
+  /* Chromatic Specular Stops for Physical Rim Refraction */
+  --g1: #5ba8ff;
+  --g2: #c97ce6;
+  --g3: #f0655c;
+  --g4: #f29d4b;
+
+  /* Ambient Overhead 318deg Studio Light */
+  --amb-light-1: rgba(228, 107, 62, 0.13);
+  --amb-light-2: rgba(106, 174, 255, 0.11);
+  --amb-light-3: rgba(63, 208, 139, 0.07);
+  --grain-opacity: 0.24;
+
+  /* Canvas Oscilloscope Palette (read by Canvas via getComputedStyle) */
+  --rl-c1: #3fd08b;   /* Speed / Common-Mode */
+  --rl-c2: #e46b3e;   /* Gyro / Differential / Vermilion actual */
+  --rl-c3: #ebb856;   /* Target reference */
+  --rl-c4: #6aaeff;   /* Secondary channel / Outer */
+  --rl-c5: #f0655c;   /* Right PWM / Saturation */
+  --rl-c6: #9b95ff;   /* Secondary wheel R */
+  --rl-grid: rgba(242, 241, 237, 0.075);
+  --rl-axis: #85837c;
+  --rl-good: #3fd08b;
+  --rl-warn: #ebb856;
+  --rl-bad: #f0655c;
+  --rl-idle: #686660;
 
   /* Legacy alias bridge for speed-scope */
   --rb-text: var(--c-fg);
   --rb-muted: var(--c-fg-muted);
-  --rb-line: var(--c-line-strong);
-  --rl-card: var(--c-surface);
+  --rb-line: var(--c-line);
+  --rl-card: var(--glass-bg);
 
-  /* ---------- Radii & Shadows ---------- */
-  --r-xs: 6px;
-  --r-sm: 10px;
-  --r-md: 14px;
-  --r-lg: 18px;
-  --r-xl: 24px;
+  /* Crisp Geometric Radii */
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 20px;
   --r-pill: 999px;
-  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 2px 6px rgba(0, 0, 0, 0.24);
-  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 14px 36px -16px rgba(0, 0, 0, 0.52);
 
-  /* ---------- Motion Language ---------- */
-  --ease-out: cubic-bezier(.16, 1, .3, 1);
-  --ease-emph: cubic-bezier(.2, 0, 0, 1);
-  --spring-snappy: linear(0, 0.2348, 0.6075, 0.8763, 1.0076, 1.0451, 1.0389, 1.0198, 1.0036, 0.9966, 0.9961, 0.9984, 1);
-  --spring-soft: linear(0, 0.0861, 0.2786, 0.4997, 0.6977, 0.8487, 0.9475, 1.0018, 1.0254, 1.0294, 1.0228, 1.0127, 1.0039, 0.9988, 0.9971, 0.9977, 1);
-  --dur-micro: 120ms;
-  --dur-fast: 190ms;
-  --dur-base: 280ms;
-  --dur-expressive: 520ms;
+  /* Physical Springs & iOS Easing Curves */
+  --ease-ios: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --spring-snappy: cubic-bezier(0.25, 1.15, 0.4, 1);
+  --spring-interactive: cubic-bezier(0.2, 1, 0.3, 1);
+  --dur-micro: 110ms;
+  --dur-fast: 180ms;
+  --dur-base: 300ms;
+  --dur-slow: 520ms;
 }
 
-/* ---------- Warm Alabaster Parchment Light Theme ---------- */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --spring-snappy: linear(0, 0.0274, 0.095, 0.1853, 0.2859, 0.388, 0.4859, 0.5761, 0.6565, 0.7266, 0.7863, 0.8361, 0.877, 0.91, 0.9361, 0.9564, 0.9719, 0.9834, 0.9918, 0.9976, 1.0016, 1.0041, 1.0055, 1.0062, 1.0063, 1.006, 1.0055, 1.005, 1.0043, 1.0037, 1.0031, 1.0025, 1);
+    --spring-interactive: linear(0, 0.0459, 0.1517, 0.2824, 0.4162, 0.5405, 0.6491, 0.7397, 0.8126, 0.8693, 0.9123, 0.9439, 0.9663, 0.9818, 0.9921, 0.9985, 1.0023, 1.0042, 1.005, 1.0049, 1.0045, 1.0039, 1.0032, 1.0026, 1);
+  }
+}
+
+/* ---------- Archival Paper & Frosted White Glass Light Theme ---------- */
 html[data-theme="light"] {
   color-scheme: light;
 
-  --c-bg: #faf9f5;
-  --c-bg-sunken: #f3f1ea;
-  --c-surface: #ffffff;
-  --c-surface-2: #f6f4ee;
-  --c-surface-3: #ece9e0;
-  --c-line: rgba(31, 30, 28, 0.085);
-  --c-line-strong: rgba(31, 30, 28, 0.16);
-  --c-fg: #1f1e1c;
-  --c-fg-muted: #5e5b54;
-  --c-fg-dim: #8d8a82;
+  --c-bg: #efeeeb;
+  --c-bg-alt: #e7e5e0;
+  --c-bg-sunken: #e8e6e1;
+  --c-surface: #f7f6f3;
+  --c-surface-2: #efede8;
+  --c-surface-3: #e5e2db;
 
-  --c-accent: #c6613f;
-  --c-accent-strong: #b45333;
-  --c-accent-soft: rgba(198, 97, 63, 0.12);
-  --c-accent-border: rgba(198, 97, 63, 0.36);
-  --c-emerald: #1f8a68;
-  --c-emerald-soft: rgba(31, 138, 104, 0.11);
-  --c-cobalt: #2e67c9;
-  --c-cobalt-soft: rgba(46, 103, 201, 0.10);
-  --c-indigo: #5c5ce0;
-  --c-amber: #b47412;
-  --c-amber-soft: rgba(180, 116, 18, 0.12);
-  --c-err: #c93b33;
-  --c-err-soft: rgba(201, 59, 51, 0.11);
-  --c-estop-top: #c9362e;
-  --c-estop-bot: #9d221c;
+  --c-fg: #121214;
+  --c-fg-muted: #5d5c58;
+  --c-fg-dim: #8a8881;
+  --c-on-ink: #f5f4f1;
 
-  --mood-speed: rgba(31, 138, 104, 0.11);
-  --mood-yaw: rgba(198, 97, 63, 0.12);
-  --mood-outer: rgba(46, 103, 201, 0.10);
-  --mood-aux: rgba(92, 92, 224, 0.08);
+  --c-rule: rgba(18, 18, 20, 0.72);
+  --c-line: rgba(18, 18, 20, 0.10);
+  --c-line-strong: rgba(18, 18, 20, 0.18);
+  --c-fill: rgba(18, 18, 20, 0.045);
+  --c-fill-2: rgba(18, 18, 20, 0.085);
 
-  --rl-c1: #1a8764;
-  --rl-c2: #c6613f;
-  --rl-c3: #b8770f;
-  --rl-c4: #2d66c7;
-  --rl-c5: #c93b33;
-  --rl-c6: #6358d4;
-  --rl-grid: rgba(31, 30, 28, 0.085);
-  --rl-axis: #7a766d;
-  --rl-good: #1f8a68;
-  --rl-warn: #b47412;
-  --rl-bad: #c93b33;
-  --rl-idle: #8d8a82;
+  /* Physical Frosted Glass Optics (Light Paper Gallery) */
+  --glass-bg: rgba(250, 249, 246, 0.70);
+  --glass-bg-strong: rgba(252, 251, 248, 0.86);
+  --glass-nav: rgba(239, 238, 235, 0.80);
+  --glass-rim-top: rgba(255, 255, 255, 0.88);
+  --glass-rim-edge: rgba(18, 18, 20, 0.09);
+  --glass-sheen: rgba(255, 255, 255, 0.52);
+  --glass-shadow: 0 20px 50px -24px rgba(18, 18, 20, 0.18), 0 2px 8px -2px rgba(18, 18, 20, 0.06);
 
-  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.85) inset, 0 2px 8px rgba(31, 30, 28, 0.05);
-  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.9) inset, 0 14px 36px -18px rgba(31, 30, 28, 0.13);
+  --c-accent: #d95926;
+  --c-accent-strong: #c2491a;
+  --c-accent-soft: rgba(217, 89, 38, 0.11);
+  --c-accent-border: rgba(217, 89, 38, 0.36);
+  --c-cobalt: #2c74d6;
+  --c-cobalt-soft: rgba(44, 116, 214, 0.10);
+  --c-emerald: #1f8a4c;
+  --c-emerald-soft: rgba(31, 138, 76, 0.10);
+  --c-amber: #b36b00;
+  --c-amber-soft: rgba(179, 107, 0, 0.11);
+  --c-err: #c93b32;
+  --c-err-soft: rgba(201, 59, 50, 0.11);
+  --c-indigo: #5652c9;
+
+  --amb-light-1: rgba(217, 89, 38, 0.085);
+  --amb-light-2: rgba(57, 135, 229, 0.075);
+  --amb-light-3: rgba(36, 138, 61, 0.055);
+  --grain-opacity: 0.42;
+
+  --rl-c1: #1f8a4c;
+  --rl-c2: #d95926;
+  --rl-c3: #b36b00;
+  --rl-c4: #2c74d6;
+  --rl-c5: #c93b32;
+  --rl-c6: #5652c9;
+  --rl-grid: rgba(18, 18, 20, 0.085);
+  --rl-axis: #6c6a64;
+  --rl-good: #1f8a4c;
+  --rl-warn: #b36b00;
+  --rl-bad: #c93b32;
+  --rl-idle: #8a8881;
 }
 
-/* ---------- Motion Tier Kill-Switches ---------- */
-@media (prefers-reduced-motion: reduce) {
-  :root {
-    --dur-micro: 1ms;
-    --dur-fast: 1ms;
-    --dur-base: 1ms;
-    --dur-expressive: 1ms;
-  }
-}
+/* ---------- Motion Intensity Tiers ---------- */
 html[data-motion="subtle"] {
-  --dur-expressive: 180ms;
+  --dur-micro: 80ms;
+  --dur-fast: 130ms;
+  --dur-base: 190ms;
+  --dur-slow: 260ms;
 }
-html[data-motion="off"] {
-  --dur-micro: 1ms;
-  --dur-fast: 1ms;
-  --dur-base: 1ms;
-  --dur-expressive: 1ms;
+html[data-motion="off"] *,
+html[data-motion="off"] *::before,
+html[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

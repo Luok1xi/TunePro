@@ -56,7 +56,8 @@
 
 ## 上手运行
 
-只需要 **Python 3.10+**，不用装任何第三方库（Linux / macOS 如果要连物理串口再装 `pyserial`，跑离线演示不需要）。
+- **直接用打包好的 `.exe`（免装 Python）**：在 GitHub [Releases](https://github.com/Luok1xi/TunePro/releases) 下载 `TunePro-Windows-x64.exe` 直接双击打开，关掉窗口后后台自动退出，遥测记录会保存在同目录的 `runs/` 下。
+- **源码直接运行**：只需要 **Python 3.10+**，不用装任何第三方库（Linux / macOS 如果要连物理串口再装 `pyserial`，跑离线演示不需要）。自己打包单文件 `.exe` 可直接运行 `python scripts/build_exe.py`（需安装 `pyinstaller`）。
 
 ### 离线虚拟小车试玩
 

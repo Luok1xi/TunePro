@@ -20,12 +20,17 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
+import urllib.request
 import webbrowser
 
-ROOT = Path(__file__).resolve().parent
-WEB_DIR = ROOT / 'web'
-sys.path.insert(0, str(ROOT))
+BUNDLE_ROOT = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
+ROOT = BUNDLE_ROOT
+WEB_DIR = BUNDLE_ROOT / 'web'
+if str(BUNDLE_ROOT) not in sys.path:
+    sys.path.insert(0, str(BUNDLE_ROOT))
 import serial_bridge
 import ai_tuner
 
@@ -34,6 +39,37 @@ mimetypes.add_type('application/javascript; charset=utf-8', '.mjs')
 mimetypes.add_type('text/css; charset=utf-8', '.css')
 
 DEMO_MODE = False
+
+
+class LifecycleTracker:
+    """Tracks live browser window connections so a frozen --noconsole EXE exits cleanly on window close."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active_clients = 0
+        self.ever_connected = False
+        self.last_zero_at = 0.0
+
+    def connect(self) -> None:
+        with self._lock:
+            self.active_clients += 1
+            self.ever_connected = True
+
+    def disconnect(self) -> None:
+        with self._lock:
+            self.active_clients = max(0, self.active_clients - 1)
+            if self.active_clients == 0:
+                self.last_zero_at = time.monotonic()
+
+    def should_exit(self, grace_s: float = 4.0) -> bool:
+        with self._lock:
+            if not self.ever_connected or self.active_clients > 0:
+                return False
+            return (time.monotonic() - self.last_zero_at) >= grace_s
+
+
+LIFECYCLE = LifecycleTracker()
+SHUTDOWN_EV = threading.Event()
 
 
 class AppServer(ThreadingHTTPServer):
@@ -91,6 +127,24 @@ class AppHandler(BaseHTTPRequestHandler):
         finally:
             serial_bridge.BRIDGE.unsubscribe(sub)
 
+    def _stream_lifecycle(self):
+        LIFECYCLE.connect()
+        self.send_response(200)
+        self._headers_common()
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Connection', 'keep-alive')
+        self.end_headers()
+        try:
+            self.wfile.write(b'event: ready\ndata: {"ok":true}\n\n')
+            self.wfile.flush()
+            while not SHUTDOWN_EV.wait(5.0):
+                self.wfile.write(b': keepalive\n\n')
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        finally:
+            LIFECYCLE.disconnect()
+
     def do_GET(self):
         try:
             parsed = urllib.parse.urlsplit(self.path)
@@ -108,6 +162,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self._send_json(serial_bridge.BRIDGE.status())
             if path == '/api/serial/stream':
                 return self._stream_sse()
+            if path == '/api/app/lifecycle':
+                return self._stream_lifecycle()
             if path == '/api/ai/snapshot':
                 loop_id = (qs.get('loop') or [None])[0]
                 dry_mode = ((qs.get('dry') or ['0'])[0] in ('1', 'true', 'yes'))
@@ -188,6 +244,10 @@ class AppHandler(BaseHTTPRequestHandler):
                     allow_real_car=bool(body.get('allow_real_car', False)),
                     confirm_wheels_off_ground=bool(body.get('confirm_wheels_off_ground', False)),
                 ))
+            if path == '/api/app/shutdown':
+                SHUTDOWN_EV.set()
+                threading.Timer(0.15, self.server.shutdown).start()
+                return self._send_json({'ok': True})
             return self._send_json({'error': '未知接口'}, 404)
         except PermissionError as exc:
             self._send_json({'error': str(exc)}, 403)
@@ -239,6 +299,18 @@ def open_app_window(url: str) -> None:
     webbrowser.open(url)
 
 
+def _existing_instance_url(host: str, preferred: int) -> str | None:
+    url = f'http://{host}:{preferred}/api/health'
+    try:
+        with urllib.request.urlopen(url, timeout=0.35) as resp:
+            info = json.loads(resp.read().decode('utf-8'))
+            if info.get('ok') and info.get('app') == 'tc264-tunepro':
+                return f'http://{host}:{preferred}/'
+    except Exception:
+        pass
+    return None
+
+
 def main():
     global DEMO_MODE
     ap = argparse.ArgumentParser(description='TC264 三环远程调参台（零依赖开源本地版）')
@@ -253,6 +325,13 @@ def main():
     if args.log_dir is not None:
         serial_bridge.BRIDGE.configure_log_dir(args.log_dir.resolve())
 
+    # If double-clicked while an instance is already running on the default port, reuse it cleanly
+    if not args.no_window:
+        existing = _existing_instance_url(args.host, args.port)
+        if existing:
+            open_app_window(existing)
+            return
+
     port = pick_port(args.host, args.port)
     httpd = AppServer((args.host, port), AppHandler)
     actual_port = httpd.server_address[1]
@@ -265,12 +344,21 @@ def main():
 
     if not args.no_window:
         threading.Timer(0.35, open_app_window, args=(url,)).start()
+        if getattr(sys, 'frozen', False):
+            def _watch_window_close():
+                while not SHUTDOWN_EV.wait(1.0):
+                    if LIFECYCLE.should_exit(grace_s=4.5) and not ai_tuner.AI_TUNER.status().get('active'):
+                        SHUTDOWN_EV.set()
+                        httpd.shutdown()
+                        break
+            threading.Thread(target=_watch_window_close, name='exe-lifecycle-watch', daemon=True).start()
 
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        SHUTDOWN_EV.set()
         ai_tuner.AI_TUNER.stop(estop=True)
         serial_bridge.BRIDGE.disconnect()
         httpd.server_close()

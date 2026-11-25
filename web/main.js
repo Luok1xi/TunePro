@@ -570,4 +570,5 @@ applyMotion(currentMotion);
 applyTopologyChrome(currentTopo);
 setPlotView('speed');
 refreshPorts();
+try { new EventSource('/api/app/lifecycle'); } catch {}
 requestAnimationFrame(tick);

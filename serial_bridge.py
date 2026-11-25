@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import sys
 import threading
 import time
 
@@ -32,7 +33,13 @@ M2_FIELDS = [
     'set_l', 'enc_l', 'pwm_l', 'set_r', 'enc_r', 'pwm_r', 'fan', 'stop',
     'heading', 'heading_target', 'age', 'drop', 'frame_seq', 'cfg_rev',
 ]
-DEFAULT_LOG_ROOT = Path(os.environ.get('TUNEPRO_LOG_DIR') or (Path(__file__).resolve().parent / 'runs'))
+def _default_app_root() -> Path:
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+DEFAULT_LOG_ROOT = Path(os.environ.get('TUNEPRO_LOG_DIR') or (_default_app_root() / 'runs'))
 ALLOWED_BAUDS = {9600, 115200, 230400, 460800, 921600, 2000000, 3000000}
 
 

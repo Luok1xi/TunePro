@@ -1,0 +1,238 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""TC264 三环远程调参台 — 零第三方依赖本地运行程序。
+
+用法：
+  双击 启动三环调参台.bat（或 启动离线演示.bat），或运行：
+  python app.py [--port 18760] [--demo] [--no-window] [--log-dir ./runs]
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import mimetypes
+import os
+from pathlib import Path
+import queue
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import urllib.parse
+import webbrowser
+
+ROOT = Path(__file__).resolve().parent
+WEB_DIR = ROOT / 'web'
+sys.path.insert(0, str(ROOT))
+import serial_bridge
+
+mimetypes.add_type('application/javascript; charset=utf-8', '.js')
+mimetypes.add_type('application/javascript; charset=utf-8', '.mjs')
+mimetypes.add_type('text/css; charset=utf-8', '.css')
+
+DEMO_MODE = False
+
+
+class AppServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 64
+
+
+class AppHandler(BaseHTTPRequestHandler):
+    server_version = 'TC264TunePro/1.0'
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _headers_common(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Cache-Control', 'no-store')
+
+    def _send_json(self, data: dict, status: int = 200):
+        raw = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self._headers_common()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _read_json(self) -> dict:
+        size = int(self.headers.get('Content-Length', '0'))
+        if size <= 0 or size > 262144:
+            return {}
+        return json.loads(self.rfile.read(size).decode('utf-8'))
+
+    def _stream_sse(self):
+        sub = serial_bridge.BRIDGE.subscribe()
+        self.send_response(200)
+        self._headers_common()
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Connection', 'keep-alive')
+        self.end_headers()
+        try:
+            init = f"event: status\ndata: {json.dumps(serial_bridge.BRIDGE.status(), ensure_ascii=False)}\n\n".encode('utf-8')
+            self.wfile.write(init)
+            self.wfile.flush()
+            while True:
+                try:
+                    ev, payload = sub.get(timeout=15.0)
+                    msg = f"event: {ev}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode('utf-8')
+                except queue.Empty:
+                    msg = b': ping\n\n'
+                self.wfile.write(msg)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        finally:
+            serial_bridge.BRIDGE.unsubscribe(sub)
+
+    def do_GET(self):
+        try:
+            path = urllib.parse.urlsplit(self.path).path
+            if path == '/api/health':
+                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.0', 'demo': DEMO_MODE})
+            if path == '/api/serial/ports':
+                return self._send_json({
+                    'ports': serial_bridge.list_serial_ports(include_demo=True, demo_first=DEMO_MODE),
+                    'status': serial_bridge.BRIDGE.status(),
+                    'demo': DEMO_MODE,
+                })
+            if path == '/api/serial/status':
+                return self._send_json(serial_bridge.BRIDGE.status())
+            if path == '/api/serial/stream':
+                return self._stream_sse()
+            rel = urllib.parse.unquote(path.lstrip('/') or 'index.html')
+            target = (WEB_DIR / rel).resolve()
+            if not target.is_relative_to(WEB_DIR.resolve()) or not target.is_file():
+                return self._send_json({'error': '文件不存在'}, 404)
+            ctype = mimetypes.guess_type(target.name)[0] or 'application/octet-stream'
+            if target.suffix == '.html':
+                ctype = 'text/html; charset=utf-8'
+            raw = target.read_bytes()
+            self.send_response(200)
+            self._headers_common()
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception as exc:
+            self._send_json({'error': str(exc)[:300]}, 500)
+
+    def do_POST(self):
+        try:
+            path = urllib.parse.urlsplit(self.path).path
+            body = self._read_json()
+            if path == '/api/serial/connect':
+                return self._send_json(serial_bridge.BRIDGE.connect(
+                    body.get('port', ''),
+                    int(body.get('baud', 115200)),
+                    bool(body.get('auto_reconnect', True)),
+                    bool(body.get('auto_log', True)),
+                ))
+            if path == '/api/serial/disconnect':
+                return self._send_json(serial_bridge.BRIDGE.disconnect())
+            if path == '/api/serial/send':
+                if 'b64' in body:
+                    raw = base64.b64decode(str(body['b64']), validate=True)
+                else:
+                    raw = str(body.get('text', '')).encode('latin1')
+                n = serial_bridge.BRIDGE.send(
+                    raw,
+                    paced=bool(body.get('paced', True)),
+                    pace_ms=float(body.get('pace_ms', 4.0)),
+                    urgent=bool(body.get('urgent', False)),
+                )
+                return self._send_json({'ok': True, 'written': n})
+            return self._send_json({'error': '未知接口'}, 404)
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            self._send_json({'error': str(exc)}, 400)
+        except (PermissionError, FileNotFoundError, ConnectionError, OSError) as exc:
+            self._send_json({'error': str(exc)}, 409)
+        except Exception as exc:
+            self._send_json({'error': str(exc)[:300]}, 500)
+
+
+def pick_port(host: str, preferred: int) -> int:
+    for port in [preferred, *range(preferred + 1, preferred + 20)]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, port))
+                return port
+            except OSError:
+                continue
+    return 0
+
+
+def open_app_window(url: str) -> None:
+    """Open as a clean native app window (Edge/Chrome --app mode), fallback to browser."""
+    if os.name == 'nt':
+        candidates = [
+            Path(r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'),
+            Path(r'C:\Program Files\Microsoft\Edge\Application\msedge.exe'),
+            Path(r'C:\Program Files\Google\Chrome\Application\chrome.exe'),
+            Path(r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe'),
+        ]
+        profile_dir = Path(tempfile.gettempdir()) / 'tc264-tunepro-window-profile'
+        for exe in candidates:
+            if exe.is_file():
+                try:
+                    subprocess.Popen(
+                        [
+                            str(exe),
+                            f'--app={url}',
+                            '--window-size=1420,900',
+                            f'--user-data-dir={profile_dir}',
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return
+                except OSError:
+                    pass
+    webbrowser.open(url)
+
+
+def main():
+    global DEMO_MODE
+    ap = argparse.ArgumentParser(description='TC264 三环远程调参台（零依赖开源本地版）')
+    ap.add_argument('--host', default='127.0.0.1', help='监听地址（默认 127.0.0.1）')
+    ap.add_argument('--port', type=int, default=18760, help='HTTP 端口（默认 18760）')
+    ap.add_argument('--demo', action='store_true', help='离线演示模式：优先选中内置虚拟小车 MOCK0')
+    ap.add_argument('--log-dir', type=Path, default=None, help='每趟 @M2 遥测自动落盘目录（默认 ./runs）')
+    ap.add_argument('--no-window', action='store_true', help='仅启动后台服务，不自动弹窗口')
+    args = ap.parse_args()
+
+    DEMO_MODE = bool(args.demo)
+    if args.log_dir is not None:
+        serial_bridge.BRIDGE.configure_log_dir(args.log_dir.resolve())
+
+    port = pick_port(args.host, args.port)
+    httpd = AppServer((args.host, port), AppHandler)
+    actual_port = httpd.server_address[1]
+    url = f'http://{args.host}:{actual_port}/'
+    print(f'TC264 三环调参台已启动：{url}', flush=True)
+    if DEMO_MODE:
+        print('离线演示模式已启用：在顶部串口下拉选择 MOCK0 点击「连接」即可零硬件体验三环调参与实时图传。', flush=True)
+    print(f'自动落盘目录：{serial_bridge.BRIDGE.status()["log_dir"]}', flush=True)
+    print('按 Ctrl+C 或关闭窗口即可退出程序。', flush=True)
+
+    if not args.no_window:
+        threading.Timer(0.35, open_app_window, args=(url,)).start()
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        serial_bridge.BRIDGE.disconnect()
+        httpd.server_close()
+
+
+if __name__ == '__main__':
+    main()

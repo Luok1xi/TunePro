@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 实时示波器与仪表组件：Canvas 滚动曲线（每像素列保留极值不丢尖峰，重启处自动断开），零第三方依赖。
-// 不加依赖。颜色从 CSS 变量读（robot-live.css 的 --rl-*），深浅色跟着页面走。
+// 高性能零回流实时示波器：ResizeObserver 缓存画布尺寸 + 主题色缓存（零每帧 getComputedStyle / getBoundingClientRect）
+// 每像素列保留 [min, max] 极值不丢超调尖峰，重启处自动断开，零第三方依赖。
 
 const TICKS = [0.2, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600];
 
@@ -12,20 +12,40 @@ function niceRange(lo, hi) {
 }
 const fmt = v => Math.abs(v) >= 1000 ? Math.round(v).toString() : Math.abs(v) >= 10 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toFixed(1) : v.toFixed(2);
 
-// series：[{ key, label, color, axis: 'l' | 'r', scale: () => 乘数, dash }]；ghost = 对照（仿真）数据，同列名虚线画
 export function createChart(canvas, store, { series, fixed = {}, unit = {} }) {
-  const ctx = canvas.getContext('2d');
-  let w = 0, h = 0, dpr = 1, lastLayout = '', cached = null;
+  const ctx = canvas.getContext('2d', { alpha: true });
+  let w = 0, h = 0, dpr = 1, cached = null, palette = null;
   const PAD = { l: 58, r: 48, t: 10, b: 18 };
 
-  function layout() {
-    const r = canvas.getBoundingClientRect(), key = `${r.width}x${r.height}x${devicePixelRatio}`;
-    if (key === lastLayout) return;
-    lastLayout = key; dpr = devicePixelRatio || 1; w = Math.max(10, r.width); h = Math.max(10, r.height);
-    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  function measure() {
+    const r = canvas.getBoundingClientRect();
+    const nextDpr = Math.min(2, devicePixelRatio || 1);
+    const nextW = Math.max(10, Math.round(r.width));
+    const nextH = Math.max(10, Math.round(r.height));
+    if (nextW === w && nextH === h && nextDpr === dpr) return;
+    w = nextW; h = nextH; dpr = nextDpr;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    cached = null;
   }
 
-  // 每个像素列一个 [min, max]，车重启（段号变了）或缺值处断开
+  function resolvePalette() {
+    const style = getComputedStyle(canvas);
+    const css = name => style.getPropertyValue(name).trim();
+    palette = {
+      grid: css('--rl-grid') || 'rgba(242,241,237,0.08)',
+      text: css('--rl-axis') || '#85837c',
+      colors: series.map(s => (s.color.startsWith('--') ? (css(s.color) || '#6aaeff') : s.color)),
+    };
+  }
+
+  // Only re-measure on actual element resize & re-read CSS variables on theme toggle
+  const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+  ro?.observe(canvas);
+  const onTheme = () => { palette = null; };
+  window.addEventListener('tunepro-theme', onTheme);
+  measure();
+
   function columns(src, key, k, t0, t1, plotW) {
     const out = new Array(Math.ceil(plotW) + 1);
     if (!src?.has(key)) return out;
@@ -45,22 +65,26 @@ export function createChart(canvas, store, { series, fixed = {}, unit = {} }) {
   }
 
   function draw({ t0, t1, ghost, hoverT, marks = [] }) {
-    layout();
+    if (!w || !h) measure();
+    if (!palette) resolvePalette();
     const plotW = Math.max(1, w - PAD.l - PAD.r), plotH = Math.max(1, h - PAD.t - PAD.b);
-    const style = getComputedStyle(canvas), css = name => style.getPropertyValue(name).trim();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    const grid = css('--rl-grid') || '#2a2d33', text = css('--rl-axis') || '#8a909b';
+
+    const { grid, text, colors } = palette;
     ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
-    // 每列的像素数据和各轴量程
-    const scales = series.map(s => s.scale ? s.scale() : 1), revision = store.version, ghostRevision = ghost?.store.version;
-    // 悬停只改指针；数据、时间窗、缩放或对照改变时才重新扫描原始采样。
+    const scales = series.map(s => s.scale ? s.scale() : 1);
+    const revision = store.version, ghostRevision = ghost?.store.version;
     const reusable = revision !== undefined && (!ghost || ghostRevision !== undefined) && cached
       && cached.revision === revision && cached.ghostStore === ghost?.store && cached.ghostRevision === ghostRevision && cached.offset === ghost?.offset
       && cached.t0 === t0 && cached.t1 === t1 && cached.width === plotW && scales.every((k, i) => k === cached.scales[i]);
-    const cols = reusable ? cached.cols : series.map((s, i) => ({ s, k: scales[i], main: columns(store, s.key, scales[i], t0, t1, plotW),
-      ghost: ghost ? columns(ghost.store, s.key, scales[i], t0 - ghost.offset, t1 - ghost.offset, plotW) : null }));
+    const cols = reusable ? cached.cols : series.map((s, i) => ({
+      s, k: scales[i], color: colors[i],
+      main: columns(store, s.key, scales[i], t0, t1, plotW),
+      ghost: ghost ? columns(ghost.store, s.key, scales[i], t0 - ghost.offset, t1 - ghost.offset, plotW) : null,
+    }));
     cached = { revision, ghostStore: ghost?.store, ghostRevision, offset: ghost?.offset, t0, t1, width: plotW, scales, cols };
+
     const range = {};
     for (const axis of ['l', 'r']) {
       if (fixed[axis]) { range[axis] = fixed[axis]; continue; }
@@ -69,23 +93,35 @@ export function createChart(canvas, store, { series, fixed = {}, unit = {} }) {
       if (lo !== Infinity) range[axis] = niceRange(lo, hi);
     }
     const y = (axis, v) => { const [lo, hi] = range[axis] || [-1, 1]; return PAD.t + plotH - (v - lo) / (hi - lo) * plotH; };
-    // 网格：横 4 条，竖按时间刻度
+
     ctx.strokeStyle = grid; ctx.lineWidth = 1; ctx.fillStyle = text;
-    for (let k = 0; k <= 4; k++) { const yy = Math.round(PAD.t + plotH * k / 4) + 0.5; ctx.beginPath(); ctx.moveTo(PAD.l, yy); ctx.lineTo(PAD.l + plotW, yy); ctx.stroke(); }
+    ctx.beginPath();
+    for (let k = 0; k <= 4; k++) { const yy = Math.round(PAD.t + plotH * k / 4) + 0.5; ctx.moveTo(PAD.l, yy); ctx.lineTo(PAD.l + plotW, yy); }
     const span = (t1 - t0) / 1000, step = TICKS.find(s => span / s <= 6) || 600;
+    const xTicks = [];
     for (let s = Math.ceil(t0 / 1000 / step) * step; s * 1000 <= t1; s += step) {
       const xx = Math.round(PAD.l + (s * 1000 - t0) / (t1 - t0) * plotW) + 0.5;
-      ctx.beginPath(); ctx.moveTo(xx, PAD.t); ctx.lineTo(xx, PAD.t + plotH); ctx.stroke();
-      ctx.textAlign = 'center'; ctx.fillText(`${+s.toFixed(1)}s`, xx, h - 4);
+      ctx.moveTo(xx, PAD.t); ctx.lineTo(xx, PAD.t + plotH);
+      xTicks.push([xx, `${+s.toFixed(1)}s`]);
     }
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    for (const [xx, label] of xTicks) ctx.fillText(label, xx, h - 4);
+
     for (const axis of ['l', 'r']) {
       const r = range[axis]; if (!r) continue;
       ctx.textAlign = axis === 'l' ? 'right' : 'left';
       const xx = axis === 'l' ? PAD.l - 6 : PAD.l + plotW + 6;
-      ctx.fillText(fmt(r[1]) + (unit[axis] ? ` ${unit[axis]}` : ''), xx, PAD.t + 9); ctx.fillText(fmt(r[0]), xx, PAD.t + plotH);
-      if (r[0] < 0 && r[1] > 0) { ctx.save(); ctx.strokeStyle = text; ctx.globalAlpha = 0.35; ctx.setLineDash([2, 3]); const zy = Math.round(y(axis, 0)) + 0.5; ctx.beginPath(); ctx.moveTo(PAD.l, zy); ctx.lineTo(PAD.l + plotW, zy); ctx.stroke(); ctx.restore(); }
+      ctx.fillText(fmt(r[1]) + (unit[axis] ? ` ${unit[axis]}` : ''), xx, PAD.t + 9);
+      ctx.fillText(fmt(r[0]), xx, PAD.t + plotH);
+      if (r[0] < 0 && r[1] > 0) {
+        ctx.save(); ctx.strokeStyle = text; ctx.globalAlpha = 0.32; ctx.setLineDash([2, 3]);
+        const zy = Math.round(y(axis, 0)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(PAD.l, zy); ctx.lineTo(PAD.l + plotW, zy); ctx.stroke(); ctx.restore();
+      }
     }
-    // 曲线：先画对照（虚线、淡），再画实车
+
     const line = (arr, axis, color, alpha, dash, width) => {
       if (!arr) return;
       ctx.save(); ctx.strokeStyle = color; ctx.globalAlpha = alpha; ctx.lineWidth = width; ctx.setLineDash(dash); ctx.lineJoin = 'round';
@@ -101,40 +137,41 @@ export function createChart(canvas, store, { series, fixed = {}, unit = {} }) {
       }
       ctx.stroke(); ctx.restore();
     };
-    for (const c of cols) line(c.ghost, c.s.axis || 'l', css(c.s.color) || c.s.color, 0.45, [4, 3], 1.2);
-    for (const c of cols) line(c.main, c.s.axis || 'l', css(c.s.color) || c.s.color, 1, c.s.dash || [], 1.6);
+    for (let i = 0; i < cols.length; i++) line(cols[i].ghost, cols[i].s.axis || 'l', colors[i], 0.42, [4, 3], 1.2);
+    for (let i = 0; i < cols.length; i++) line(cols[i].main, cols[i].s.axis || 'l', colors[i], 1, cols[i].s.dash || [], 1.7);
+
     if (marks.length) {
-      ctx.save();
-      ctx.strokeStyle = text;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 3]);
+      ctx.save(); ctx.strokeStyle = text; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
       ctx.beginPath();
       for (const t of marks) {
         if (t < t0 || t > t1) continue;
         const x = PAD.l + (t - t0) / (t1 - t0) * plotW;
-        ctx.moveTo(x, PAD.t);
-        ctx.lineTo(x, PAD.t + plotH);
+        ctx.moveTo(x, PAD.t); ctx.lineTo(x, PAD.t + plotH);
       }
-      ctx.stroke();
-      ctx.restore();
+      ctx.stroke(); ctx.restore();
     }
-    // 鼠标停的那一刻：竖线 + 每条线的点
+
     const readout = [];
     if (Number.isFinite(hoverT) && hoverT >= t0 && hoverT <= t1) {
       const xx = PAD.l + (hoverT - t0) / (t1 - t0) * plotW;
-      ctx.save(); ctx.strokeStyle = text; ctx.globalAlpha = 0.6; ctx.beginPath(); ctx.moveTo(xx, PAD.t); ctx.lineTo(xx, PAD.t + plotH); ctx.stroke(); ctx.restore();
-      for (const c of cols) {
+      ctx.save(); ctx.strokeStyle = text; ctx.globalAlpha = 0.55; ctx.beginPath(); ctx.moveTo(xx, PAD.t); ctx.lineTo(xx, PAD.t + plotH); ctx.stroke(); ctx.restore();
+      for (let i = 0; i < cols.length; i++) {
+        const c = cols[i];
         const v = nearest(store, c.s.key, hoverT) * c.k; if (!Number.isFinite(v)) continue;
-        ctx.fillStyle = css(c.s.color) || c.s.color; ctx.beginPath(); ctx.arc(xx, y(c.s.axis || 'l', v), 3, 0, 7); ctx.fill();
+        ctx.fillStyle = colors[i]; ctx.beginPath(); ctx.arc(xx, y(c.s.axis || 'l', v), 3.2, 0, 7); ctx.fill();
         readout.push({ label: c.s.label, v, color: c.s.color });
       }
     }
     return { readout, plot: { left: PAD.l, width: plotW } };
   }
-  return { draw };
+
+  function destroy() {
+    ro?.disconnect();
+    window.removeEventListener('tunepro-theme', onTheme);
+  }
+  return { draw, destroy };
 }
 
-// 离 t 最近的有值点（前后各找 400 个）
 export function nearest(src, key, t) {
   if (!src?.has(key)) return NaN;
   const i = src.find(t);
@@ -152,15 +189,13 @@ export function nearest(src, key, t) {
   return best;
 }
 
-// ---------- SVG 仪表 ----------
 const arcPath = (cx, cy, r, a0, a1) => {
   const p = a => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
   const [x0, y0] = p(a0), [x1, y1] = p(a1);
   return `M${x0.toFixed(2)},${y0.toFixed(2)}A${r},${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${x1.toFixed(2)},${y1.toFixed(2)}`;
 };
-const A0 = Math.PI * 0.75, A1 = Math.PI * 2.25;   // 270° 弧：左下到右下
+const A0 = Math.PI * 0.75, A1 = Math.PI * 2.25;
 
-// 圆表：value 为 null 时只画刻度；mark = 目标值的小三角；level = good / warn / bad 决定颜色
 export function gaugeSVG({ value, min, max, mark = null, level = 'good', ticks = 5 }) {
   const f = v => A0 + (Math.min(Math.max(v, min), max) - min) / (max - min) * (A1 - A0);
   const tick = [...Array(ticks + 1)].map((_, k) => { const a = A0 + k / ticks * (A1 - A0); return `<line x1="${(60 + 41 * Math.cos(a)).toFixed(1)}" y1="${(60 + 41 * Math.sin(a)).toFixed(1)}" x2="${(60 + 46 * Math.cos(a)).toFixed(1)}" y2="${(60 + 46 * Math.sin(a)).toFixed(1)}"/>`; }).join('');
@@ -171,7 +206,6 @@ export function gaugeSVG({ value, min, max, mark = null, level = 'good', ticks =
     <g class="rl-g-ticks">${tick}</g>${m}</svg>`;
 }
 
-// 罗盘：航向（imu_sum，左转为正）指针 + 目标航向小点；数学角度：0° 朝上，左转逆时针
 export function compassSVG(yaw, target) {
   const pt = (deg, r) => { const a = (-deg - 90) * Math.PI / 180; return [60 + r * Math.cos(a), 60 + r * Math.sin(a)]; };
   const ticks = [...Array(24)].map((_, k) => { const [x0, y0] = pt(k * 15, k % 6 ? 45 : 41), [x1, y1] = pt(k * 15, 49); return `<line x1="${x0.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y1.toFixed(1)}"/>`; }).join('');
@@ -180,12 +214,10 @@ export function compassSVG(yaw, target) {
   return `<svg viewBox="0 0 120 120" class="rl-compass" aria-hidden="true"><circle class="rl-g-track" cx="60" cy="60" r="50"/><g class="rl-g-ticks">${ticks}</g>${tgt}${needle}</svg>`;
 }
 
-// 迷你折线（电池掉压一类）：values 按时间排好
 export function sparkSVG(values, { lo, hi } = {}) {
   if (values.length < 2) return '<svg viewBox="0 0 100 24" class="rl-spark"></svg>';
   let min = Infinity, max = -Infinity;
   const indices = [];
-  // 100 像素内保留每列首、末和极值，长记录不生成上万个 SVG 点，也不漏掉单点掉压。
   for (let col = 0; col < 100; col++) {
     const start = Math.floor(col * values.length / 100), end = Math.floor((col + 1) * values.length / 100);
     if (end <= start) continue;

@@ -238,6 +238,53 @@ class TestAITunerGuardrails(unittest.TestCase):
             self.assertEqual(csv_res['samples'], 5)
             self.assertLess(csv_res['metrics']['tail_mae'], 5.0)
 
+    def test_ai_chat_and_reasoning_effort(self):
+        # Reasoning effort normalization & round budgets
+        self.assertEqual(ai_tuner.normalize_effort('max'), 'max')
+        self.assertEqual(ai_tuner.normalize_effort('HIGH'), 'high')
+        self.assertEqual(ai_tuner.normalize_effort('unknown_tier'), 'medium')
+        self.assertEqual(ai_tuner.REASONING_LEVELS['fast']['default_rounds'], 3)
+        self.assertEqual(ai_tuner.REASONING_LEVELS['max']['default_rounds'], 10)
+
+        bridge = serial_bridge.SerialBridge(serial_factory=serial_bridge.open_serial_port)
+        tuner = ai_tuner.AITunerManager(bridge)
+        try:
+            bridge.connect('MOCK0', 115200, auto_reconnect=False, auto_log=False)
+            time.sleep(0.15)
+            # Ask AI to damp overshoot with live telemetry and high reasoning effort
+            res_damp = tuner.chat({
+                'message': '入弯超调太大而且有一点晃动，怎么压低？',
+                'loop': 'yaw_2s1p',
+                'provider': 'rule',
+                'reasoning_effort': 'high',
+                'live_telemetry': {'spd': 120.0, 'gyro': 280.0, 'pwmCm': 2100.0, 'pwmDm': 1950.0},
+            })
+            self.assertTrue(res_damp['ok'])
+            self.assertEqual(res_damp['effort'], 'high')
+            self.assertTrue(len(res_damp['insights']) >= 2)
+            self.assertIsNotNone(res_damp['suggested_params'])
+            self.assertLess(res_damp['suggested_params']['ykp'], 18.0)
+
+            # Dry-floor reference intent must stay within bounded step
+            res_dry = tuner.chat({
+                'message': '切干地 0% 负压参考参数',
+                'loop': 'yaw_2s1p',
+                'provider': 'rule',
+                'reasoning_effort': 'max',
+                'dry_mode': True,
+            })
+            self.assertTrue(res_dry['ok'])
+            self.assertIsNotNone(res_dry['suggested_params'])
+            self.assertLessEqual(res_dry['suggested_params']['ykp'], 14.0)
+
+            # Empty chat message rejected
+            with self.assertRaises(ValueError):
+                tuner.chat({'message': '   ', 'loop': 'yaw_2s1p'})
+        finally:
+            tuner.stop(estop=False)
+            tuner.session.stop()
+            bridge.disconnect()
+
 
 if __name__ == '__main__':
     unittest.main()

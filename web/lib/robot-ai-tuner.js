@@ -1,30 +1,58 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// AI 自动调参面板（内置零依赖循证规则整定器 + OpenAI 兼容 / Ollama / Claude HTTP 接口）
+// AI 调参搭档（实时对话 + 物理弹簧推理强度与模型切换浮层 + 4ms 阶跃自主调参）
 // 搭配后端 ai_tuner.py 硬安全护栏（步长限幅、@GP1 回读核验、劣化自动回滚、3S 电压底线、实车架空确认）。
 import { esc } from './esc.js';
+import { mountEffortSlider } from './robot-optics.js';
 
 const LOOP_OPTIONS = [
-  { id: 'yaw_2s1p', topo: '2s1p', label: '两串一并 · 角速度直出 PWM (yff / ykp / yki)', target: 300, low: 0, unit: '°/s', view: 'yaw' },
-  { id: 'speed_2s1p', topo: '2s1p', label: '两串一并 · 均速并联环 (vkp / vki)', target: 150, low: 90, unit: 'cnt/2ms', view: 'speed' },
-  { id: 'yaw_3c', topo: '3cascade', label: '传统三串 · 角速度中环 (ykp / yki)', target: 260, low: 0, unit: '°/s', view: 'yaw' },
-  { id: 'speed_3c', topo: '3cascade', label: '传统三串 · 双轮速度内环 (lkp/lki/rkp/rki)', target: 140, low: 85, unit: 'cnt/2ms', view: 'speed' },
-  { id: 'outer', topo: 'both', label: '视觉外环 · 巡线 PD (dirp / dird)', target: 125, low: 80, unit: 'cnt/2ms', view: 'outer' },
+  { id: 'yaw_2s1p', topo: '2s1p', label: '2S1P · 角速度直出 PWM', target: 300, low: 0, unit: '°/s', view: 'yaw' },
+  { id: 'speed_2s1p', topo: '2s1p', label: '2S1P · 均速并联环', target: 150, low: 90, unit: 'cnt', view: 'speed' },
+  { id: 'yaw_3c', topo: '3cascade', label: '三串 · 角速度中环', target: 260, low: 0, unit: '°/s', view: 'yaw' },
+  { id: 'speed_3c', topo: '3cascade', label: '三串 · 双轮速度内环', target: 140, low: 85, unit: 'cnt', view: 'speed' },
+  { id: 'outer', topo: 'both', label: '视觉外环 · 巡线 PD', target: 125, low: 80, unit: 'cnt', view: 'outer' },
+];
+
+const EFFORT_LEVELS = [
+  { id: 'fast',   label: '极速', en: 'Fast',   rounds: 3, desc: '秒级直答 · 3 轮快测' },
+  { id: 'low',    label: '轻量', en: 'Low',    rounds: 4, desc: '简明建议 · 4 轮整定' },
+  { id: 'medium', label: '均衡', en: 'Medium', rounds: 6, desc: '速度与深度均衡 · 6 轮' },
+  { id: 'high',   label: '深度', en: 'High',   rounds: 8, desc: '多维对比分析 · 8 轮' },
+  { id: 'max',    label: '极限', en: 'Max',    rounds: 10, desc: '深度根因与极限裕度 · 10 轮' },
+];
+
+const MODEL_PRESETS = [
+  { id: 'rule',     label: '内置离线', provider: 'rule',      url: '',                             model: '' },
+  { id: 'deepseek', label: 'DeepSeek', provider: 'openai',    url: 'https://api.deepseek.com/v1',  model: 'deepseek-chat' },
+  { id: 'ollama',   label: 'Ollama',   provider: 'ollama',    url: 'http://127.0.0.1:11434/v1',    model: 'qwen2.5:7b' },
+  { id: 'openai',   label: 'OpenAI',   provider: 'openai',    url: 'https://api.openai.com/v1',    model: 'gpt-4o-mini' },
+  { id: 'claude',   label: 'Claude',   provider: 'anthropic', url: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-latest' },
+];
+
+const QUICK_PROMPTS = [
+  '诊断当前参数与实时曲线',
+  '超调偏大怎么压低？',
+  '响应偏慢想提速',
+  '切干地 0% 负压参考',
 ];
 
 const PHASE_LABELS = {
   idle: ['待命', 'idle'],
   starting: ['启动中', 'busy'],
-  measuring: ['4ms 阶跃采集中', 'busy'],
-  analyzing: ['指标分析 / 生成建议', 'busy'],
-  applying: ['写参回读核验', 'busy'],
-  rollback: ['劣化自动回滚', 'warn'],
+  measuring: ['4ms 采集中', 'busy'],
+  analyzing: ['推导参数中', 'busy'],
+  applying: ['写参核验中', 'busy'],
+  rollback: ['劣化回滚中', 'warn'],
   stopping: ['正在急停', 'bad'],
   done: ['已完成', 'good'],
-  stopped_by_user: ['已手动停止', 'warn'],
+  stopped_by_user: ['已中止', 'warn'],
   error: ['异常中止', 'bad'],
 };
 
-const PREF_AI_CFG = 'tp-ai-tuner-cfg-v1';
+const BOLT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L4.5 13.5H12L11 22L19.5 10.5H12L13 2Z"/></svg>';
+const RESET_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+const UP_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M6 11l6-6 6 6"/></svg>';
+
+const PREF_AI_CFG = 'tp-ai-tuner-cfg-v2';
 
 function loadSavedCfg() {
   try {
@@ -39,7 +67,7 @@ function saveCfg(partial) {
   try {
     const prev = loadSavedCfg();
     const next = { ...prev, ...partial };
-    delete next.api_key; // 密钥永不写入 localStorage
+    delete next.api_key; // 密钥仅存内存，永不写入 localStorage
     localStorage.setItem(PREF_AI_CFG, JSON.stringify(next));
   } catch {}
 }
@@ -51,198 +79,261 @@ function fmtParams(p) {
     .join(' · ');
 }
 
-export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusView, onStateBadge }) {
+function nowHHMMSS() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry, onLog, onFocusView, onStateBadge }) {
   const saved = loadSavedCfg();
   let open = false;
   let pollTimer = 0;
   let lastSnap = null;
   let lastStatus = null;
   let busyAction = false;
+  let chatBusy = false;
+  let runsOpen = false;
+  let popoverOpen = false;
+  let modelDrawerOpen = false;
+  let effortIdx = Math.max(0, Math.min(EFFORT_LEVELS.length - 1, EFFORT_LEVELS.findIndex(e => e.id === (saved.effort || 'medium'))));
+  if (effortIdx < 0) effortIdx = 2;
+  let lastAnnouncedRound = 0;
+  let wasAutoActive = false;
 
-  host.className = 'tp-card ait-panel';
+  const chatHistory = []; // [{ role, text }] sent as context
+  const pendingProposals = new Map(); // proposalId -> { loop, params, dry_mode }
+  let proposalSeq = 0;
+
+  host.className = 'ait-panel';
   host.hidden = true;
   host.innerHTML = `
-    <div class="ait-head">
-      <div class="ait-head-left">
-        <div class="ait-title-row">
-          <strong class="tp-card-title">AI 自动调参</strong>
-          <span class="ait-badge" data-ait-phase data-level="idle">待命</span>
-          <span class="ait-port-tag" data-ait-port-tag>未连接</span>
-        </div>
-        <p class="ait-sub">基于 4 ms 板载阶跃与有界安全护栏自动迭代整定 · 劣化自动回滚至历史最佳稳定参数</p>
+    <!-- 顶部状态与轮次表开关 -->
+    <div class="ait-top-bar">
+      <div class="ait-title-row">
+        <strong class="tp-card-title">AI 调参搭档</strong>
+        <span class="ait-badge" data-ait-phase data-level="idle">待命</span>
+        <span class="ait-port-tag" data-ait-port-tag>未连接</span>
       </div>
       <div class="ait-head-actions">
-        <button type="button" data-ait-refresh>刷新</button>
-        <button type="button" data-ait-close>切回手动</button>
+        <button type="button" class="ait-pill-btn" data-ait-runs-toggle aria-expanded="false">轮次 <span data-ait-progress>0/6</span></button>
+        <button type="button" class="ait-pill-btn" data-ait-refresh title="刷新车端参数快照">↻</button>
       </div>
     </div>
 
     <div class="ait-warn-bar" data-ait-transport-warn hidden>
-      AI 自动调参需通过「本机串口桥」控制与回读，请在顶栏连接方式切回本机串口桥。
+      AI 调参需通过「本机串口桥」控制与回读，请在顶栏切回本机串口桥。
     </div>
 
-    <div class="ait-grid">
-      <!-- 左侧：调参任务与模型配置 -->
-      <div class="ait-box">
-        <h5>整定目标与安全护栏 <small data-ait-bounds-hint>护栏限幅生效</small></h5>
-        <div class="ait-form-grid">
-          <label class="ait-field ait-span-2">
-            <span>整定环路</span>
-            <select data-ait-loop>
-              ${LOOP_OPTIONS.map(o => `<option value="${o.id}">${esc(o.label)}</option>`).join('')}
-            </select>
-          </label>
-          <label class="ait-field">
-            <span>阶跃目标 <small data-ait-unit>°/s</small></span>
-            <input type="number" data-ait-target value="300" step="10">
-          </label>
-          <label class="ait-field">
-            <span>最大轮数</span>
-            <input type="number" data-ait-rounds value="6" min="2" max="12" step="1">
-          </label>
-          <label class="ait-field">
-            <span>偏好策略</span>
-            <select data-ait-goal>
-              <option value="balanced">均衡（默认）</option>
-              <option value="fast_response">响应速度优先</option>
-              <option value="low_overshoot">低超调优先</option>
-              <option value="stability_first">稳健抗振优先</option>
-            </select>
-          </label>
-          <label class="ait-field ait-check-field" data-ait-dry-wrap title="两串一并角速度环专用：干地无负压时自动把 Kp 上限锁在 14.0">
-            <input type="checkbox" data-ait-dry>
-            <span>干地限幅 (ykp ≤ 14)</span>
-          </label>
+    <!-- 紧凑任务控制条 -->
+    <div class="ait-ctrl-strip">
+      <div class="ait-ctrl-row">
+        <select data-ait-loop aria-label="整定环路">
+          ${LOOP_OPTIONS.map(o => `<option value="${o.id}">${esc(o.label)}</option>`).join('')}
+        </select>
+        <label class="ait-unit-lbl">目标 <input type="number" data-ait-target value="300" step="10"><span data-ait-unit>°/s</span></label>
+        <select data-ait-goal aria-label="偏好策略">
+          <option value="balanced">均衡策略</option>
+          <option value="fast_response">响应优先</option>
+          <option value="low_overshoot">低超调优先</option>
+          <option value="stability_first">稳健抗振</option>
+        </select>
+        <label class="ait-dry-chk" data-ait-dry-wrap title="两串一并角速度环专用：干地无负压时将 Kp 上限锁在 14.0">
+          <input type="checkbox" data-ait-dry> 干地限幅
+        </label>
+      </div>
+      <div class="ait-actions">
+        <button type="button" class="tp-btn-accent" data-ait-start disabled>自动调参</button>
+        <button type="button" data-ait-step disabled title="执行 1 趟 4 ms 阶跃基线测试，并把实时诊断结论发入对话">单步测基线</button>
+        <button type="button" data-ait-rollback disabled title="恢复并回读验证当前会话最佳稳定参数">恢复最佳</button>
+        <button type="button" class="ait-stop-btn" data-ait-stop disabled>急停</button>
+      </div>
+    </div>
+
+    <!-- 实车物理串口安全联锁（MOCK0 自动隐藏） -->
+    <div class="ait-realcar-gate" data-ait-realcar-gate hidden>
+      <label class="ait-gate-chk">
+        <input type="checkbox" data-ait-realcar-ok>
+        <span>实车安全联锁：已架空车轮、确认 3S ≥ 11.7V 且随时准备按 Esc 急停</span>
+      </label>
+    </div>
+
+    <!-- 紧凑历史最佳条（有最佳验证轮次时显示） -->
+    <div class="ait-best-mini" data-ait-best-mini hidden>
+      <span data-ait-best-params>—</span>
+      <b data-ait-best-metrics>—</b>
+    </div>
+
+    <!-- 可展开的详细轮次表抽屉 -->
+    <div class="ait-runs-drawer" data-ait-runs-drawer hidden>
+      <div class="ait-status-line" data-ait-msg>连接 MOCK0 虚拟小车或实车串口后即可实时对话或自动整定。</div>
+      <div class="ait-bounds-strip" data-ait-cur-params>当前车端参数：未同步</div>
+      <div class="ait-table-wrap">
+        <table class="ait-table">
+          <thead>
+            <tr>
+              <th>轮</th>
+              <th>参数</th>
+              <th>上升</th>
+              <th>超调</th>
+              <th>静差</th>
+              <th>状态</th>
+              <th>结论</th>
+            </tr>
+          </thead>
+          <tbody data-ait-tbody>
+            <tr><td colspan="7" class="ait-empty">暂无阶跃轮次。点击「单步测基线」或「自动调参」开始采集。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 实时交互对话流 -->
+    <div class="ait-chat-feed" data-ait-chat-feed role="log" aria-live="polite"></div>
+
+    <!-- 底部玻璃输入框 + 推理强度/模型悬浮窗 -->
+    <div class="ait-composer-wrap" data-ait-composer-wrap>
+      <!-- 悬浮毛玻璃推理强度与模型切换浮层 -->
+      <div class="eff-popover" data-eff-popover data-level="${effortIdx}" role="dialog" aria-label="选择推理强度与模型">
+        <div class="eff-pop-head">
+          <span class="eff-bolt" data-eff-bolt data-level="${effortIdx}">${BOLT_SVG}</span>
+          <div class="eff-head-center">
+            <div class="eff-title-slot">
+              <strong class="eff-title" data-eff-title>${EFFORT_LEVELS[effortIdx].label} · ${EFFORT_LEVELS[effortIdx].en}</strong>
+            </div>
+            <button type="button" class="eff-model-btn" data-eff-model-toggle aria-expanded="false">
+              <span data-eff-model-label>内置循证引擎</span><span class="eff-chev">›</span>
+            </button>
+          </div>
+          <button type="button" class="eff-reset-btn" data-eff-reset title="重置为默认均衡推理强度" aria-label="重置推理强度">
+            ${RESET_SVG}
+          </button>
         </div>
 
-        <div class="ait-divider"></div>
+        <!-- 5 档物理弹簧磁吸胶囊滑块 -->
+        <div class="eff-track" data-eff-track tabindex="0" role="slider" aria-label="推理强度" aria-valuemin="0" aria-valuemax="4" aria-valuenow="${effortIdx}">
+          <div class="eff-fill" data-eff-fill></div>
+          <div class="eff-dots">
+            <span class="eff-dot" data-eff-dot="0"></span>
+            <span class="eff-dot" data-eff-dot="1"></span>
+            <span class="eff-dot" data-eff-dot="2"></span>
+            <span class="eff-dot" data-eff-dot="3"></span>
+            <span class="eff-dot" data-eff-dot="4"></span>
+          </div>
+          <div class="eff-thumb" data-eff-thumb></div>
+        </div>
 
-        <h5>决策引擎 <small>零第三方依赖</small></h5>
-        <div class="ait-form-grid">
-          <label class="ait-field ait-span-2">
-            <span>模式选择</span>
-            <select data-ait-provider>
-              <option value="rule">内置循证规则整定器（零 API Key · 离线可用）</option>
-              <option value="openai">OpenAI 兼容接口（DeepSeek / 通义千问 / OpenAI / vLLM）</option>
-              <option value="ollama">Ollama 本地大模型（127.0.0.1:11434）</option>
-              <option value="anthropic">Anthropic Claude API</option>
-            </select>
-          </label>
-          <div class="ait-llm-fields ait-span-2" data-ait-llm-box hidden>
-            <div class="ait-form-grid">
-              <label class="ait-field ait-span-2">
-                <span>API Base URL</span>
+        <div class="eff-meta-row">
+          <span data-eff-desc>${EFFORT_LEVELS[effortIdx].desc}</span>
+          <span data-eff-rounds-badge>默认 ${EFFORT_LEVELS[effortIdx].rounds} 轮</span>
+        </div>
+
+        <!-- 点击模型名称平滑展开的模型通道抽屉 -->
+        <div class="eff-model-drawer" data-eff-model-drawer>
+          <div class="eff-model-drawer-inner">
+            <div class="eff-presets" data-eff-presets>
+              ${MODEL_PRESETS.map(p => `<button type="button" class="eff-preset-chip" data-eff-preset="${p.id}" aria-pressed="false">${esc(p.label)}</button>`).join('')}
+            </div>
+            <div class="eff-form-grid">
+              <label class="eff-field is-full">
+                <span>通道协议</span>
+                <select data-ait-provider>
+                  <option value="rule">内置循证引擎（零 API Key · 离线可用）</option>
+                  <option value="openai">OpenAI 兼容（DeepSeek / 通义 / vLLM / OpenAI）</option>
+                  <option value="ollama">Ollama 本地大模型</option>
+                  <option value="anthropic">Anthropic Claude</option>
+                </select>
+              </label>
+              <label class="eff-field is-full" data-ait-llm-row>
+                <span>Base URL</span>
                 <input type="text" data-ait-url placeholder="https://api.deepseek.com/v1" autocomplete="off" spellcheck="false">
               </label>
-              <label class="ait-field">
+              <label class="eff-field" data-ait-llm-row>
                 <span>Model 名称</span>
                 <input type="text" data-ait-model placeholder="deepseek-chat" autocomplete="off" spellcheck="false">
               </label>
-              <label class="ait-field">
-                <span>API Key（仅内存使用，不落盘）</span>
-                <input type="password" data-ait-key placeholder="可留空读取环境变量" autocomplete="off">
+              <label class="eff-field" data-ait-llm-row>
+                <span>API Key（仅内存）</span>
+                <input type="password" data-ait-key placeholder="留空读环境变量" autocomplete="off">
               </label>
             </div>
           </div>
-          <label class="ait-field ait-span-2">
-            <span>调参前补充说明（可选）</span>
-            <input type="text" data-ait-note placeholder="例如：车重偏大、弯道别超调超过 6%，优先保稳态精度" maxlength="260">
-          </label>
-        </div>
-
-        <div class="ait-realcar-gate" data-ait-realcar-gate hidden>
-          <label class="ait-gate-chk">
-            <input type="checkbox" data-ait-realcar-ok>
-            <span>实车安全联锁：已将车轮架空离地、确认 3S 电压 ≥ 11.7V 且随时准备按 Esc 急停</span>
-          </label>
-        </div>
-
-        <div class="ait-actions">
-          <button type="button" class="tp-btn-accent" data-ait-start disabled>开始 AI 自动调参</button>
-          <button type="button" data-ait-step disabled title="只做 1 趟 4 ms 阶跃基线测量，不修改参数">单步测基线</button>
-          <button type="button" data-ait-rollback disabled title="恢复并回读验证当前会话最佳稳定参数">恢复最佳参数</button>
-          <button type="button" class="ait-stop-btn" data-ait-stop disabled>停止并急停</button>
         </div>
       </div>
 
-      <!-- 右侧：实时实验看板与迭代历史 -->
-      <div class="ait-box ait-board">
-        <div class="ait-board-head">
-          <h5>实验进度与最佳参数</h5>
-          <span class="ait-progress-txt" data-ait-progress>0 / 6 轮</span>
-        </div>
-        <div class="ait-status-line" data-ait-msg>连接 MOCK0 虚拟小车或实车串口后，即可点击「开始 AI 自动调参」。</div>
-
-        <div class="ait-best-card" data-ait-best>
-          <div>
-            <span class="ait-best-lbl">当前验证最佳稳定参数</span>
-            <strong class="ait-best-params" data-ait-best-params>尚无已验证轮次</strong>
+      <!-- 底部聊天输入胶囊 -->
+      <div class="ait-composer">
+        <textarea data-ait-chat-input rows="1" placeholder="描述波形现象或车体体感，例如：入弯超调太大 / 响应太慢…"></textarea>
+        <div class="ait-composer-bar">
+          <span class="ait-ctx-pill" data-ait-ctx-pill>已挂载实时遥测</span>
+          <div class="ait-composer-right">
+            <button type="button" class="eff-trigger" data-eff-trigger data-level="${effortIdx}" aria-expanded="false" title="选择模型与推理强度">
+              <span class="eff-trigger-bolt">${BOLT_SVG}</span>
+              <span data-eff-trigger-lvl>${EFFORT_LEVELS[effortIdx].label}</span>
+              <span class="eff-trigger-model" data-eff-trigger-model>内置引擎</span>
+            </button>
+            <button type="button" class="ait-send-btn" data-ait-send title="发送消息 (Enter)" aria-label="发送">
+              ${UP_SVG}
+            </button>
           </div>
-          <div class="ait-best-metrics" data-ait-best-metrics>等待基线测量</div>
-        </div>
-
-        <div class="ait-bounds-strip" data-ait-cur-params>当前车端参数：未同步</div>
-
-        <div class="ait-table-wrap">
-          <table class="ait-table">
-            <thead>
-              <tr>
-                <th>轮次</th>
-                <th>参数快照</th>
-                <th>上升</th>
-                <th>超调</th>
-                <th>静差</th>
-                <th>饱和</th>
-                <th>状态</th>
-                <th>动作与依据</th>
-              </tr>
-            </thead>
-            <tbody data-ait-tbody>
-              <tr><td colspan="8" class="ait-empty">暂无实验记录。点击「开始 AI 自动调参」或「单步测基线」开始测量。</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="ait-skill-hint">
-          <span>外部 Agent 接入：</span>
-          <code>skills/tc264-pid-tuner/SKILL.md</code>
-          <span>· CLI：</span>
-          <code>python skills/tc264-pid-tuner/scripts/tunepro_ai_cli.py snapshot</code>
         </div>
       </div>
     </div>
   `;
 
   const $ = q => host.querySelector(q);
+  const $$ = q => [...host.querySelectorAll(q)];
+
   const elLoop = $('[data-ait-loop]');
   const elTarget = $('[data-ait-target]');
-  const elRounds = $('[data-ait-rounds]');
   const elGoal = $('[data-ait-goal]');
   const elDry = $('[data-ait-dry]');
   const elDryWrap = $('[data-ait-dry-wrap]');
   const elProvider = $('[data-ait-provider]');
-  const elLlmBox = $('[data-ait-llm-box]');
   const elUrl = $('[data-ait-url]');
   const elModel = $('[data-ait-model]');
   const elKey = $('[data-ait-key]');
-  const elNote = $('[data-ait-note]');
   const elRealGate = $('[data-ait-realcar-gate]');
   const elRealOk = $('[data-ait-realcar-ok]');
   const btnStart = $('[data-ait-start]');
   const btnStep = $('[data-ait-step]');
   const btnRollback = $('[data-ait-rollback]');
   const btnStop = $('[data-ait-stop]');
+  const elFeed = $('[data-ait-chat-feed]');
+  const elChatInput = $('[data-ait-chat-input]');
+  const btnSend = $('[data-ait-send]');
+  const elPopover = $('[data-eff-popover]');
+  const btnTrigger = $('[data-eff-trigger]');
+  const elBolt = $('[data-eff-bolt]');
+  const elEffTitle = $('[data-eff-title]');
+  const elModelDrawer = $('[data-eff-model-drawer]');
+  const btnModelToggle = $('[data-eff-model-toggle]');
+  const btnReset = $('[data-eff-reset]');
+  const elTrack = $('[data-eff-track]');
+  const elRunsDrawer = $('[data-ait-runs-drawer]');
+  const btnRunsToggle = $('[data-ait-runs-toggle]');
 
-  // Restore non-secret UI prefs
+  // Restore saved non-secret preferences
   if (saved.provider && ['rule', 'openai', 'ollama', 'anthropic'].includes(saved.provider)) elProvider.value = saved.provider;
   if (saved.base_url) elUrl.value = saved.base_url;
   if (saved.model) elModel.value = saved.model;
   if (saved.goal && ['balanced', 'fast_response', 'low_overshoot', 'stability_first'].includes(saved.goal)) elGoal.value = saved.goal;
-  if (saved.max_rounds) elRounds.value = String(saved.max_rounds);
+
+  function currentEffort() { return EFFORT_LEVELS[effortIdx] || EFFORT_LEVELS[2]; }
+
+  function shortModelName() {
+    const p = elProvider.value;
+    const m = elModel.value.trim();
+    if (p === 'rule') return '内置循证引擎';
+    if (m) return m;
+    if (p === 'ollama') return 'qwen2.5:7b';
+    if (p === 'anthropic') return 'Claude 3.5';
+    return 'OpenAI 兼容';
+  }
 
   function syncProviderUI() {
     const prov = elProvider.value;
-    elLlmBox.hidden = prov === 'rule';
+    const isRule = prov === 'rule';
+    $$('[data-ait-llm-row]').forEach(row => { row.hidden = isRule; });
     if (prov === 'ollama') {
       elUrl.placeholder = 'http://127.0.0.1:11434/v1';
       elModel.placeholder = 'qwen2.5:7b';
@@ -254,7 +345,72 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
       elUrl.placeholder = 'https://api.deepseek.com/v1';
       elModel.placeholder = 'deepseek-chat / gpt-4o-mini';
     }
-    saveCfg({ provider: prov, base_url: elUrl.value.trim(), model: elModel.value.trim() });
+    const label = shortModelName();
+    $('[data-eff-model-label]').textContent = label;
+    $('[data-eff-trigger-model]').textContent = prov === 'rule' ? '内置引擎' : label;
+
+    const urlLow = elUrl.value.trim().toLowerCase();
+    $$('[data-eff-preset]').forEach(btn => {
+      const pid = btn.dataset.effPreset;
+      const match =
+        (pid === 'rule' && prov === 'rule') ||
+        (pid === 'ollama' && prov === 'ollama') ||
+        (pid === 'claude' && prov === 'anthropic') ||
+        (pid === 'deepseek' && prov === 'openai' && urlLow.includes('deepseek')) ||
+        (pid === 'openai' && prov === 'openai' && !urlLow.includes('deepseek'));
+      btn.setAttribute('aria-pressed', String(match));
+    });
+
+    saveCfg({ provider: prov, base_url: elUrl.value.trim(), model: elModel.value.trim(), effort: currentEffort().id });
+  }
+
+  function updateEffortChrome(nextIdx, prevIdx = nextIdx) {
+    effortIdx = nextIdx;
+    const eff = currentEffort();
+    elPopover.dataset.level = String(effortIdx);
+    btnTrigger.dataset.level = String(effortIdx);
+    elBolt.dataset.level = String(effortIdx);
+    elTrack.setAttribute('aria-valuenow', String(effortIdx));
+    $('[data-eff-trigger-lvl]').textContent = eff.label;
+    $('[data-eff-desc]').textContent = eff.desc;
+    $('[data-eff-rounds-badge]').textContent = `默认 ${eff.rounds} 轮`;
+
+    // Directional vertical rolling animation on level title
+    const nextText = `${eff.label} · ${eff.en}`;
+    if (elEffTitle.textContent !== nextText) {
+      elEffTitle.textContent = nextText;
+      elEffTitle.classList.remove('roll-up', 'roll-down');
+      elEffTitle.offsetWidth; // trigger single reflow for crisp roll restart
+      elEffTitle.classList.add(nextIdx >= prevIdx ? 'roll-up' : 'roll-down');
+    }
+
+    if (!lastStatus?.active) {
+      $('[data-ait-progress]').textContent = `${lastStatus?.round || 0}/${eff.rounds}`;
+    }
+    saveCfg({ effort: eff.id });
+  }
+
+  // Mount the 2nd-order spring physics capsule slider
+  const effortSlider = mountEffortSlider(elTrack, {
+    levels: EFFORT_LEVELS.length,
+    initialIndex: effortIdx,
+    onChange(nextIdx) {
+      const prev = effortIdx;
+      updateEffortChrome(nextIdx, prev);
+    },
+  });
+
+  function setPopoverOpen(yes) {
+    popoverOpen = Boolean(yes);
+    elPopover.classList.toggle('is-open', popoverOpen);
+    btnTrigger.setAttribute('aria-expanded', String(popoverOpen));
+    if (popoverOpen) requestAnimationFrame(() => effortSlider.render());
+  }
+
+  function setRunsOpen(yes) {
+    runsOpen = Boolean(yes);
+    elRunsDrawer.hidden = !runsOpen;
+    btnRunsToggle.setAttribute('aria-expanded', String(runsOpen));
   }
 
   function syncLoopUI(updateTarget = true) {
@@ -262,6 +418,167 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
     $('[data-ait-unit]').textContent = opt.unit;
     if (updateTarget) elTarget.value = String(opt.target);
     elDryWrap.hidden = opt.id !== 'yaw_2s1p';
+  }
+
+  function scrollChatToBottom() {
+    requestAnimationFrame(() => { elFeed.scrollTop = elFeed.scrollHeight; });
+  }
+
+  function appendMessage({ role = 'assistant', kind = 'chat', text = '', insights = [], suggested = null, notes = [], loop = null, meta = '' }) {
+    const wrap = document.createElement('article');
+    wrap.className = 'ait-msg';
+    wrap.dataset.role = role;
+    wrap.dataset.kind = kind;
+
+    let headHTML = '';
+    if (role === 'assistant') {
+      headHTML = `<div class="ait-msg-head"><span class="ait-msg-effort">⚡ ${esc(meta || `${currentEffort().label} · ${shortModelName()}`)}</span><span>${nowHHMMSS()}</span></div>`;
+    }
+
+    const insHTML = insights && insights.length
+      ? `<ul class="ait-insights">${insights.map(line => `<li>${esc(line)}</li>`).join('')}</ul>`
+      : '';
+
+    let suggestHTML = '';
+    if (suggested && typeof suggested === 'object' && Object.keys(suggested).length) {
+      const pid = `prop_${++proposalSeq}`;
+      pendingProposals.set(pid, { loop: loop || elLoop.value, params: suggested, dry_mode: elDry.checked });
+      const noteText = notes && notes.length ? notes.join('；') : '已通过安全步长与幅值护栏核验';
+      suggestHTML = `
+        <div class="ait-suggest-card">
+          <div class="ait-suggest-params">${esc(fmtParams(suggested))}</div>
+          <div class="ait-suggest-foot">
+            <span class="ait-suggest-note">${esc(noteText)}</span>
+            <button type="button" class="ait-apply-btn" data-ait-apply-proposal="${pid}">安全写入并核验</button>
+          </div>
+        </div>`;
+    }
+
+    wrap.innerHTML = `${headHTML}<div class="ait-msg-bubble">${esc(text)}${insHTML}${suggestHTML}</div>`;
+    elFeed.append(wrap);
+    scrollChatToBottom();
+    return wrap;
+  }
+
+  function appendWelcome() {
+    const msg = appendMessage({
+      role: 'assistant',
+      kind: 'welcome',
+      meta: `${currentEffort().label} · 实时调参搭档`,
+      text: '已接入当前实时波形与车端参数快照。你可以直接告诉我体感问题，或点击「单步测基线 / 自动调参」——每跑完一趟我会立刻给出工程见解与安全步长内的改参卡片。',
+    });
+    const chips = document.createElement('div');
+    chips.className = 'ait-quick-chips';
+    chips.innerHTML = QUICK_PROMPTS.map(p => `<button type="button" class="ait-quick-chip" data-ait-prompt="${esc(p)}">${esc(p)}</button>`).join('');
+    msg.append(chips);
+  }
+
+  async function applyProposal(pid, btnEl) {
+    const item = pendingProposals.get(pid);
+    if (!item || !btnEl) return;
+    const usingBridge = getTransport() === 'bridge';
+    if (!usingBridge || !isConnected()) {
+      appendMessage({ role: 'assistant', kind: 'live-event', text: '请先在顶栏通过本机串口桥连接 MOCK0 或实车串口后再写入参数。' });
+      return;
+    }
+    const isMock = Boolean(lastStatus?.is_mock ?? lastSnap?.is_mock);
+    if (!isMock && !elRealOk.checked) {
+      appendMessage({ role: 'assistant', kind: 'live-event', text: '实车安全联锁未勾选：请先确认架空车轮并勾选上方实车安全联锁，再一键写入参数。' });
+      return;
+    }
+    btnEl.disabled = true;
+    const oldLabel = btnEl.textContent;
+    btnEl.textContent = '写入核验中…';
+    try {
+      const r = await fetch('/api/ai/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          loop: item.loop,
+          parameters: item.params,
+          dry_mode: item.dry_mode,
+          allow_real_car: elRealOk.checked,
+          confirm_wheels_off_ground: elRealOk.checked,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      btnEl.dataset.applied = 'true';
+      btnEl.textContent = `已写入 rev ${data.rev} ✓`;
+      onLog?.('event', `AI 建议参数已写入并回读确认：${fmtParams(data.applied)} (rev ${data.rev})`);
+      fetchSnapshot();
+    } catch (e) {
+      btnEl.disabled = false;
+      btnEl.textContent = oldLabel;
+      appendMessage({ role: 'assistant', kind: 'live-event', text: `参数写入被拦截或失败：${e.message}` });
+      onLog?.('error', `AI 写入失败：${e.message}`);
+    }
+  }
+
+  async function sendChatMessage(rawText) {
+    const text = (rawText ?? elChatInput.value).trim();
+    if (!text || chatBusy) return;
+    setPopoverOpen(false);
+    elChatInput.value = '';
+    elChatInput.style.height = 'auto';
+
+    appendMessage({ role: 'user', text });
+    chatHistory.push({ role: 'user', text });
+    if (chatHistory.length > 14) chatHistory.splice(0, chatHistory.length - 14);
+
+    chatBusy = true;
+    btnSend.disabled = true;
+    const typingEl = document.createElement('div');
+    typingEl.className = 'ait-msg';
+    typingEl.dataset.role = 'assistant';
+    typingEl.innerHTML = `<div class="ait-msg-bubble"><span class="ait-typing"><i></i><i></i><i></i> 结合实时遥测分析中（${esc(currentEffort().label)}）…</span></div>`;
+    elFeed.append(typingEl);
+    scrollChatToBottom();
+
+    try {
+      const live = typeof getLiveTelemetry === 'function' ? (getLiveTelemetry() || {}) : {};
+      const cleanLive = {};
+      for (const [k, v] of Object.entries(live)) {
+        if (Number.isFinite(v)) cleanLive[k] = Number(v.toFixed(2));
+      }
+      const r = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: text,
+          history: chatHistory.slice(-8),
+          loop: elLoop.value,
+          dry_mode: elDry.checked,
+          provider: elProvider.value,
+          base_url: elUrl.value.trim(),
+          model: elModel.value.trim(),
+          api_key: elKey.value.trim(),
+          reasoning_effort: currentEffort().id,
+          live_telemetry: cleanLive,
+        }),
+      });
+      const data = await r.json();
+      typingEl.remove();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+
+      appendMessage({
+        role: 'assistant',
+        text: data.reply || '已完成分析。',
+        insights: data.insights || [],
+        suggested: data.suggested_params || null,
+        notes: data.guardrail_notes || [],
+        loop: data.loop || elLoop.value,
+        meta: `${currentEffort().label} · ${data.model || shortModelName()}`,
+      });
+      chatHistory.push({ role: 'assistant', text: data.reply || '' });
+    } catch (e) {
+      typingEl.remove();
+      appendMessage({ role: 'assistant', kind: 'live-event', text: `对话请求失败：${e.message}` });
+    } finally {
+      chatBusy = false;
+      btnSend.disabled = false;
+      elChatInput.focus();
+    }
   }
 
   function updateControls() {
@@ -276,12 +593,15 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
     if (!conn) {
       portTag.textContent = '未连接';
       portTag.dataset.level = 'idle';
+      $('[data-ait-ctx-pill]').textContent = '离线模式 · 可直接咨询';
     } else if (isMock) {
-      portTag.textContent = `${port} 虚拟小车 · 安全沙箱`;
+      portTag.textContent = `${port} 沙箱`;
       portTag.dataset.level = 'good';
+      $('[data-ait-ctx-pill]').textContent = `实时遥测已挂载 · ${port}`;
     } else {
-      portTag.textContent = `${port} 实车串口 · 需架空确认`;
+      portTag.textContent = `${port} 实车`;
       portTag.dataset.level = 'warn';
+      $('[data-ait-ctx-pill]').textContent = `实车遥测已挂载 · ${port}`;
     }
 
     elRealGate.hidden = !conn || isMock;
@@ -294,7 +614,6 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
 
     elLoop.disabled = active;
     elTarget.disabled = active;
-    elRounds.disabled = active;
     elGoal.disabled = active;
     elDry.disabled = active;
     elProvider.disabled = active;
@@ -310,47 +629,72 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
     phEl.textContent = phaseText;
     phEl.dataset.level = level;
 
-    $('[data-ait-progress]').textContent = `${st.round || 0} / ${st.max_rounds || Number(elRounds.value) || 6} 轮`
-      + (st.rejected_count ? ` · 避坑 ${st.rejected_count}` : '');
+    const maxR = (st.active || (st.round || 0) > 0) ? (st.max_rounds || currentEffort().rounds) : currentEffort().rounds;
+    $('[data-ait-progress]').textContent = `${st.round || 0}/${maxR}`;
     $('[data-ait-msg]').textContent = st.message || '就绪';
 
+    const bestMini = $('[data-ait-best-mini]');
     if (st.best) {
       const m = st.best.metrics || {};
-      $('[data-ait-best-params]').textContent = `第 ${st.best.round} 轮 · ${fmtParams(st.best.parameters)}`;
-      $('[data-ait-best-metrics]').textContent =
-        `评分 ${st.best.score} · 上升 ${m.rise_ms ?? '—'} ms · 超调 ${m.overshoot_pct ?? '—'}% · 静差 ${m.steady_err_pct ?? '—'}%`;
+      bestMini.hidden = false;
+      $('[data-ait-best-params]').textContent = `★ #${st.best.round} ${fmtParams(st.best.parameters)}`;
+      $('[data-ait-best-metrics]').textContent = `升 ${m.rise_ms ?? '—'}ms · 冲 ${m.overshoot_pct ?? '—'}% · 分 ${st.best.score}`;
     } else {
-      $('[data-ait-best-params]').textContent = '尚无已验证轮次';
-      $('[data-ait-best-metrics]').textContent = '等待基线测量';
+      bestMini.hidden = true;
     }
 
     const rows = Array.isArray(st.history) ? st.history : [];
     const tbody = $('[data-ait-tbody]');
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="ait-empty">暂无实验记录。点击「开始 AI 自动调参」或「单步测基线」开始测量。</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="ait-empty">暂无阶跃轮次。点击「单步测基线」或「自动调参」开始采集。</td></tr>';
     } else {
       tbody.innerHTML = rows.map(r => {
         const m = r.metrics || {};
         const stLevel = m.status === 'STABLE' ? 'good' : (m.status === 'OSCILLATING' || m.status === 'SATURATED') ? 'bad' : 'warn';
         const actLevel = r.action === 'ROLLBACK' ? 'bad' : (r.action === 'DONE' || r.action === 'HOLD_VERIFY') ? 'good' : 'idle';
         const notes = (r.guardrail_notes || []).length
-          ? `<div class="ait-notes">护栏：${esc(r.guardrail_notes.join('；'))}</div>` : '';
+          ? `<div class="ait-notes">${esc(r.guardrail_notes.join('；'))}</div>` : '';
         return `<tr class="${r.is_best ? 'is-best' : ''}">
           <td><b>#${r.round}</b>${r.is_best ? '<span class="ait-star">★</span>' : ''}</td>
           <td class="ait-mono">${esc(fmtParams(r.parameters))}</td>
-          <td class="ait-mono">${m.rise_ms ?? '—'} ms</td>
+          <td class="ait-mono">${m.rise_ms ?? '—'}ms</td>
           <td class="ait-mono">${m.overshoot_pct ?? '—'}%</td>
           <td class="ait-mono">${m.steady_err_pct ?? '—'}%</td>
-          <td class="ait-mono">${m.pwm_sat_pct ?? '—'}%</td>
           <td><span class="ait-tag" data-level="${stLevel}">${esc(m.status || '—')}</span></td>
-          <td>
-            <span class="ait-tag" data-level="${actLevel}">${esc(r.action || '—')}</span>
-            <span class="ait-reason">${esc(r.summary || '')}</span>
-            ${notes}
-          </td>
+          <td><span class="ait-tag" data-level="${actLevel}">${esc(r.action || '—')}</span><span class="ait-reason">${esc(r.summary || '')}</span>${notes}</td>
         </tr>`;
       }).join('');
     }
+
+    // Proactively stream new auto-tune round insights right into the conversation feed!
+    if (rows.length > lastAnnouncedRound) {
+      for (let i = lastAnnouncedRound; i < rows.length; i++) {
+        const r = rows[i];
+        const m = r.metrics || {};
+        appendMessage({
+          role: 'assistant',
+          kind: 'live-event',
+          meta: `自动调参 · 第 ${r.round} 轮`,
+          text: r.summary || `第 ${r.round} 轮 4 ms 阶跃采集完成（${m.status || '—'}）。`,
+          insights: [
+            `参数：${fmtParams(r.parameters)}`,
+            `上升 ${m.rise_ms ?? '—'} ms · 超调 ${m.overshoot_pct ?? '—'}% · 静差 ${m.steady_err_pct ?? '—'}% · 饱和 ${m.pwm_sat_pct ?? '—'}% · 评分 ${r.score}`,
+          ],
+        });
+      }
+      lastAnnouncedRound = rows.length;
+    }
+
+    if (wasAutoActive && !st.active && st.phase === 'done') {
+      appendMessage({
+        role: 'assistant',
+        kind: 'live-event',
+        meta: '自动调参收尾',
+        text: st.message || '自动调参已完成。',
+        insights: st.best ? [`已保留最佳稳定参数（第 ${st.best.round} 轮）：${fmtParams(st.best.parameters)}`] : [],
+      });
+    }
+    wasAutoActive = Boolean(st.active);
     updateControls();
   }
 
@@ -363,12 +707,9 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
       const snap = await r.json();
       lastSnap = snap;
       const curStr = snap.current_parameters ? fmtParams(snap.current_parameters) : '未同步';
-      const bStr = snap.bounds
-        ? Object.entries(snap.bounds).map(([k, v]) => `${k}[${v.min}~${v.max}, ±${v.max_step}]`).join(' · ')
-        : '';
       $('[data-ait-cur-params]').textContent = `当前车端参数：${curStr}`;
-      $('[data-ait-bounds-hint]').textContent = bStr || '护栏限幅生效';
       if (snap.tuner) {
+        if (!snap.tuner.active && (snap.tuner.history || []).length === 0) lastAnnouncedRound = 0;
         renderStatus({
           ...snap.tuner,
           connected: snap.connected,
@@ -400,15 +741,13 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
 
   async function startAutoTune() {
     const opt = LOOP_OPTIONS.find(o => o.id === elLoop.value) || LOOP_OPTIONS[0];
+    const eff = currentEffort();
     onFocusView?.(opt.view);
-    saveCfg({
-      provider: elProvider.value,
-      base_url: elUrl.value.trim(),
-      model: elModel.value.trim(),
-      goal: elGoal.value,
-      max_rounds: Number(elRounds.value) || 6,
-    });
+    setPopoverOpen(false);
+    saveCfg({ provider: elProvider.value, base_url: elUrl.value.trim(), model: elModel.value.trim(), goal: elGoal.value, effort: eff.id });
     busyAction = true;
+    lastAnnouncedRound = 0;
+    wasAutoActive = true;
     updateControls();
     try {
       const r = await fetch('/api/ai/start', {
@@ -420,24 +759,31 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
           base_url: elUrl.value.trim(),
           model: elModel.value.trim(),
           api_key: elKey.value.trim(),
+          reasoning_effort: eff.id,
           target: Number(elTarget.value) || opt.target,
           low: opt.low,
-          max_rounds: Number(elRounds.value) || 6,
+          max_rounds: eff.rounds,
           goal: elGoal.value,
           dry_mode: elDry.checked,
-          user_note: elNote.value.trim(),
           allow_real_car: elRealOk.checked,
           confirm_wheels_off_ground: elRealOk.checked,
         }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      appendMessage({
+        role: 'assistant',
+        kind: 'live-event',
+        meta: `${eff.label} · 自动整定启动`,
+        text: `开始整定「${opt.label}」（目标 ${Number(elTarget.value) || opt.target} ${opt.unit} · 最多 ${eff.rounds} 轮 · ${shortModelName()}），每轮 4 ms 阶跃完成后将实时同步结论。`,
+      });
       renderStatus(data);
       ensurePolling();
-      onLog?.('event', `启动 AI 自动调参：${opt.label}（${elProvider.value}）`);
+      onLog?.('event', `启动 AI 自动调参：${opt.label}（${elProvider.value} · ${eff.id}）`);
     } catch (e) {
+      wasAutoActive = false;
       onLog?.('error', `AI 自动调参启动失败：${e.message}`);
-      $('[data-ait-msg]').textContent = `启动失败：${e.message}`;
+      appendMessage({ role: 'assistant', kind: 'live-event', text: `自动调参启动失败：${e.message}` });
     } finally {
       busyAction = false;
       updateControls();
@@ -448,7 +794,6 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
     const opt = LOOP_OPTIONS.find(o => o.id === elLoop.value) || LOOP_OPTIONS[0];
     onFocusView?.(opt.view);
     busyAction = true;
-    $('[data-ait-msg]').textContent = `正在执行单次 4 ms 阶跃基线测试（${opt.label}）…`;
     updateControls();
     try {
       const r = await fetch('/api/ai/step-test', {
@@ -466,12 +811,27 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       const m = data.metrics;
-      const summary = `单步基线完成：上升 ${m.rise_ms} ms · 超调 ${m.overshoot_pct}% · 静差 ${m.steady_err_pct}% · 饱和 ${m.pwm_sat_pct}% · 状态 ${m.status}（评分 ${data.score}）`;
-      $('[data-ait-msg]').textContent = summary;
-      onLog?.('event', summary);
+      const advice = m.status === 'OSCILLATING'
+        ? '出现振荡，建议小步回调 Kp 并压低 Ki。'
+        : m.overshoot_pct > 10
+          ? `超调 ${m.overshoot_pct}% 偏高，建议适度降低 Kp 或削弱积分。`
+          : m.status === 'SLOW_RESPONSE'
+            ? `上升 ${m.rise_ms} ms 偏慢，在 PWM 未触顶前可稳步提高 Kp。`
+            : '阶跃响应进入稳定窗口，可继续小步细调或直接保留。';
+      appendMessage({
+        role: 'assistant',
+        kind: 'live-event',
+        meta: `单步基线 · ${m.status}`,
+        text: `4 ms 板载阶跃采集完成（评分 ${data.score}）：${advice}`,
+        insights: [
+          `参数快照：${fmtParams(data.parameters)}`,
+          `上升 ${m.rise_ms} ms · 超调 ${m.overshoot_pct}% · 静差 ${m.steady_err_pct}% · PWM 饱和 ${m.pwm_sat_pct}%`,
+        ],
+      });
+      onLog?.('event', `单步基线完成：上升 ${m.rise_ms} ms · 超调 ${m.overshoot_pct}% · 状态 ${m.status}`);
       await fetchSnapshot();
     } catch (e) {
-      $('[data-ait-msg]').textContent = `单步测量失败：${e.message}`;
+      appendMessage({ role: 'assistant', kind: 'live-event', text: `单步测量失败：${e.message}` });
       onLog?.('error', `单步测量失败：${e.message}`);
     } finally {
       busyAction = false;
@@ -493,9 +853,16 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      appendMessage({
+        role: 'assistant',
+        kind: 'live-event',
+        meta: '回滚核验',
+        text: `已恢复并回读确认第 ${data.restored_round} 轮最佳参数：${fmtParams(data.parameters)}。`,
+      });
       onLog?.('event', `已回滚至第 ${data.restored_round} 轮最佳参数：${fmtParams(data.parameters)}`);
       await fetchSnapshot();
     } catch (e) {
+      appendMessage({ role: 'assistant', kind: 'live-event', text: `回滚失败：${e.message}` });
       onLog?.('error', `回滚失败：${e.message}`);
     } finally {
       busyAction = false;
@@ -515,14 +882,71 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
     } catch {}
   }
 
+  // ---------- Event Wiring ----------
+  btnTrigger.addEventListener('click', e => {
+    e.stopPropagation();
+    setPopoverOpen(!popoverOpen);
+  });
+  btnModelToggle.addEventListener('click', () => {
+    modelDrawerOpen = !modelDrawerOpen;
+    elModelDrawer.classList.toggle('is-open', modelDrawerOpen);
+    btnModelToggle.setAttribute('aria-expanded', String(modelDrawerOpen));
+  });
+  btnReset.addEventListener('click', () => {
+    btnReset.classList.remove('is-spinning');
+    btnReset.offsetWidth;
+    btnReset.classList.add('is-spinning');
+    effortSlider.setIndex(2, { notify: true, kick: true });
+  });
+  $('[data-eff-presets]').addEventListener('click', e => {
+    const btn = e.target.closest('[data-eff-preset]');
+    if (!btn) return;
+    const preset = MODEL_PRESETS.find(p => p.id === btn.dataset.effPreset);
+    if (!preset) return;
+    elProvider.value = preset.provider;
+    elUrl.value = preset.url;
+    elModel.value = preset.model;
+    syncProviderUI();
+  });
+
+  // Close popover when clicking outside or pressing Escape
+  document.addEventListener('pointerdown', e => {
+    if (!popoverOpen) return;
+    if (!host.querySelector('[data-ait-composer-wrap]').contains(e.target)) setPopoverOpen(false);
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && popoverOpen) setPopoverOpen(false);
+  });
+
+  // Chat feed delegations (quick prompt chips + one-click apply proposal cards)
+  elFeed.addEventListener('click', e => {
+    const chip = e.target.closest('[data-ait-prompt]');
+    if (chip) { sendChatMessage(chip.dataset.aitPrompt); return; }
+    const applyBtn = e.target.closest('[data-ait-apply-proposal]');
+    if (applyBtn) { applyProposal(applyBtn.dataset.aitApplyProposal, applyBtn); }
+  });
+
+  elChatInput.addEventListener('input', () => {
+    elChatInput.style.height = 'auto';
+    elChatInput.style.height = `${Math.min(92, elChatInput.scrollHeight)}px`;
+  });
+  elChatInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+  btnSend.addEventListener('click', () => sendChatMessage());
+
   elProvider.addEventListener('change', syncProviderUI);
   elUrl.addEventListener('change', syncProviderUI);
   elModel.addEventListener('change', syncProviderUI);
+  elGoal.addEventListener('change', () => saveCfg({ goal: elGoal.value }));
   elLoop.addEventListener('change', () => { syncLoopUI(true); fetchSnapshot(); });
   elDry.addEventListener('change', fetchSnapshot);
   elRealOk.addEventListener('change', updateControls);
+  btnRunsToggle.addEventListener('click', () => setRunsOpen(!runsOpen));
   $('[data-ait-refresh]').addEventListener('click', fetchSnapshot);
-  $('[data-ait-close]').addEventListener('click', () => setOpen(false));
   btnStart.addEventListener('click', startAutoTune);
   btnStep.addEventListener('click', runOneStep);
   btnRollback.addEventListener('click', doRollback);
@@ -531,6 +955,7 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
   function setOpen(yes) {
     open = Boolean(yes);
     host.hidden = !open;
+    if (!open) setPopoverOpen(false);
     onStateBadge?.({ active: Boolean(lastStatus?.active), phase: lastStatus?.phase || 'idle', open });
     if (open) {
       fetchSnapshot();
@@ -550,6 +975,8 @@ export function mountAiTuner(host, { getTransport, isConnected, onLog, onFocusVi
 
   syncProviderUI();
   syncLoopUI(true);
+  updateEffortChrome(effortIdx, effortIdx);
+  appendWelcome();
   updateControls();
 
   return {

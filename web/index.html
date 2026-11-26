@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark" data-motion="standard" data-topology="2s1p">
+<html lang="zh-CN" data-theme="dark" data-motion="standard" data-topology="2s1p" data-active-loop="speed">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -111,50 +111,49 @@
 
     <!-- 3. 双栏玻璃工作室主体：左侧实时视觉舞台 | 右侧吸顶毛玻璃调参检查器 -->
     <div class="tp-workspace" data-workspace>
-      <!-- 左侧舞台：环路拓扑条 → 50Hz 玻璃示波器 → 4ms 板载示波器 + 暗房相纸摄像头 → 折叠日志 -->
+      <!-- 左侧舞台：环路流光条 → 50Hz示波器与实时摄像头并排平视 → 全宽4ms板载阶跃示波器 → 折叠日志 -->
       <div class="tp-stage-col">
-        <!-- 活的控制环路极简流光条（由 robot-tune-pro.js 挂载渲染） -->
+        <!-- 活的控制环路极简流光条（点击任意环，环绕光效随选中环路切换） -->
         <section class="tp-glass tp-stage-ribbon" data-stage-host aria-label="控制环路拓扑"></section>
 
-        <!-- 主 50 Hz 玻璃示波器 -->
-        <section class="tp-glass tp-scope-card">
-          <div class="tp-card-head">
-            <div class="tp-line-tabs" role="group" aria-label="主波形视图">
-              <button type="button" data-view="speed" aria-pressed="true">均速 / 轮速</button>
-              <button type="button" data-view="yaw" aria-pressed="false">角速度环</button>
-              <button type="button" data-view="pwm_split" aria-pressed="false" title="两串一并专属：纵向并联共模 PWM vs 转向串级差模 PWM">共模 / 差模 PWM</button>
-              <button type="button" data-view="outer" aria-pressed="false">外环偏差</button>
-              <button type="button" data-view="pwm" aria-pressed="false">左右 PWM</button>
-            </div>
-            <div class="tp-scope-tools">
-              <div class="tp-mini-seg" role="group" aria-label="时间窗">
-                <button type="button" data-span="5" aria-pressed="false">5s</button>
-                <button type="button" data-span="10" aria-pressed="true">10s</button>
-                <button type="button" data-span="30" aria-pressed="false">30s</button>
-                <button type="button" data-span="0" aria-pressed="false">全</button>
+        <!-- 顶层视觉平视台：一边看波形和摄像头实时画面，一边直接在右侧拖滑条调参 -->
+        <div class="tp-hero-stage">
+          <!-- 主 50 Hz 实时示波器 -->
+          <section class="tp-glass tp-scope-card">
+            <div class="tp-card-head">
+              <div class="tp-line-tabs" role="group" aria-label="主波形视图">
+                <button type="button" data-view="speed" aria-pressed="true">均速 / 轮速</button>
+                <button type="button" data-view="yaw" aria-pressed="false">角速度环</button>
+                <button type="button" data-view="pwm_split" aria-pressed="false" title="两串一并专属：纵向并联共模 PWM vs 转向串级差模 PWM">共模 / 差模</button>
+                <button type="button" data-view="outer" aria-pressed="false">外环偏差</button>
+                <button type="button" data-view="pwm" aria-pressed="false">左右 PWM</button>
               </div>
-              <button type="button" class="tp-btn-subtle" data-follow aria-pressed="true">暂停</button>
-              <button type="button" class="tp-btn-subtle" data-clear-plot>清屏</button>
+              <div class="tp-scope-tools">
+                <div class="tp-mini-seg" role="group" aria-label="时间窗">
+                  <button type="button" data-span="5" aria-pressed="false">5s</button>
+                  <button type="button" data-span="10" aria-pressed="true">10s</button>
+                  <button type="button" data-span="30" aria-pressed="false">30s</button>
+                  <button type="button" data-span="0" aria-pressed="false">全</button>
+                </div>
+                <button type="button" class="tp-btn-subtle" data-follow aria-pressed="true">暂停</button>
+                <button type="button" class="tp-btn-subtle" data-clear-plot>清屏</button>
+              </div>
             </div>
-          </div>
-          <div class="tp-diag-bar">
-            <div class="tp-diag-chips" data-diag></div>
-            <div class="tp-legend" data-legend></div>
-          </div>
-          <div class="tp-plot-wrap">
-            <canvas data-main-chart></canvas>
-            <div class="tp-readout" data-readout hidden></div>
-          </div>
-        </section>
+            <div class="tp-diag-bar">
+              <div class="tp-diag-chips" data-diag></div>
+              <div class="tp-legend" data-legend></div>
+            </div>
+            <div class="tp-plot-wrap">
+              <canvas data-main-chart></canvas>
+              <div class="tp-readout" data-readout hidden></div>
+            </div>
+          </section>
 
-        <!-- 下半舞台：左 4ms 高清阶跃示波器 + 右暗房相纸实时图传 -->
-        <div class="tp-substage">
-          <div class="tp-glass tp-scope-sub" data-speed-scope></div>
-
+          <!-- 紧邻调参区的实时摄像头监控 -->
           <section class="tp-glass tp-cam-card">
             <div class="tp-cam-head">
               <div>
-                <span class="tp-micro-kicker">CAMERA · 188×120</span>
+                <span class="tp-micro-kicker">LIVE VISION · 188×120</span>
                 <strong class="tp-card-title">实时摄像头</strong>
               </div>
               <span class="tp-cam-meta" data-cam-title>等待图传</span>
@@ -166,18 +165,21 @@
               </div>
             </div>
             <div class="tp-cam-stream-host" data-cam-stream-host></div>
-            <div class="tp-cam-stats" data-cam-stats>开启「二值 RLE」可获 8~12 FPS 无线实时图传，也可单张抓图。</div>
+            <div class="tp-cam-stats" data-cam-stats>开启「二值 RLE」可获 8~12 FPS 无线实时图传，边看图边调参。</div>
             <div class="tp-cam-foot">
-              <button type="button" class="tp-btn-subtle" data-grab="bin" disabled title="兼容旧固件：抓单张二值图 (#B)">抓二值 #B</button>
-              <button type="button" class="tp-btn-subtle" data-grab="gray" disabled title="兼容旧固件：抓单张灰度图 (#I)">抓灰度 #I</button>
-              <label class="tp-chk"><input type="checkbox" data-guides checked> 中线带</label>
-              <button type="button" class="tp-btn-subtle" data-save-png disabled>存 PNG</button>
+              <button type="button" class="tp-btn-subtle" data-grab="bin" disabled title="抓取单张二值图 (#B)">抓二值</button>
+              <button type="button" class="tp-btn-subtle" data-grab="gray" disabled title="抓取单张灰度图 (#I)">抓灰度</button>
+              <label class="tp-chk"><input type="checkbox" data-guides checked> 中线</label>
+              <button type="button" class="tp-btn-subtle" data-save-png disabled>存图</button>
             </div>
           </section>
         </div>
 
-        <!-- 折叠串口日志 -->
-        <details class="tp-glass tp-log-card">
+        <!-- 下半全宽 4 ms 高清板载阶跃示波器 -->
+        <div class="tp-glass tp-scope-sub" data-speed-scope></div>
+
+        <!-- 折叠串口日志（折叠时零 DOM 渲染开销） -->
+        <details class="tp-glass tp-log-card" data-log-card>
           <summary>
             <span>串口日志与车端回执</span>
             <span class="tp-log-meta" data-log-count>0 条</span>

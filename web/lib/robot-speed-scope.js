@@ -89,6 +89,7 @@ export function mountSpeedScope(host) {
     const fKey = isYaw ? 'gyro_dps' : `enc${side}`;
     const extents = [run, other].filter(Boolean).flatMap(record => record.capture.rows.flatMap(row => [row[tKey], row[fKey]]).filter(Number.isFinite));
     const lo = Math.floor(Math.min(isYaw ? -400 : -50, ...extents) / 50) * 50, hi = Math.ceil(Math.max(isYaw ? 400 : 350, ...extents) / 50) * 50;
+    if (charts) { charts.speed?.destroy?.(); charts.pwm?.destroy?.(); charts = null; }
     charts = {
       speed: createChart($('[data-rs-speed]'), storeOf(run), { series: [{ key: tKey, label: isYaw ? '角速度目标 °/s' : '目标', color: '--rl-c3' }, { key: fKey, label: isYaw ? '陀螺实测 °/s' : '反馈', color: isYaw ? '--rl-c2' : side === 'L' ? '--rl-c1' : '--rl-c4' }], fixed: { l: [lo, hi] } }),
       pwm: createChart($('[data-rs-pwm]'), storeOf(run), { series: [{ key: `pwm${side}`, label: 'PWM', color: '--rl-c5' }], fixed: { l: [-PWM_LIMIT, PWM_LIMIT] } }),
@@ -200,5 +201,5 @@ export function mountSpeedScope(host) {
   const resize = new ResizeObserver(schedule); resize.observe(host);
   on(window, 'tunepro-theme', () => { if (current()) rebuild(); });
   if (runs.length) choose(runs[0].id); else announce();
-  return { addCapture, destroy() { disposed = true; controller.abort(); resize.disconnect(); cancelAnimationFrame(frame); host.replaceChildren(); } };
+  return { addCapture, destroy() { disposed = true; if (charts) { charts.speed?.destroy?.(); charts.pwm?.destroy?.(); charts = null; } controller.abort(); resize.disconnect(); cancelAnimationFrame(frame); host.replaceChildren(); } };
 }

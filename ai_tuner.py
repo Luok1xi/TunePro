@@ -211,6 +211,19 @@ GOAL_PRESETS: dict[str, dict[str, float]] = {
     'stability_first': {'overshoot_w': 1.6, 'rise_w': 0.6, 'steady_w': 1.1, 'osc_w': 1.8, 'max_overshoot_scale': 0.70},
 }
 
+REASONING_LEVELS: dict[str, dict[str, Any]] = {
+    'fast':   {'label': '极速', 'en': 'Fast',   'default_rounds': 3,  'max_tokens': 320, 'temp': 0.25, 'depth': '简明直给，优先快速修正最明显问题。'},
+    'low':    {'label': '轻量', 'en': 'Low',    'default_rounds': 4,  'max_tokens': 420, 'temp': 0.22, 'depth': '关注主要阶跃指标（上升时间与超调），给出稳妥微调。'},
+    'medium': {'label': '均衡', 'en': 'Medium', 'default_rounds': 6,  'max_tokens': 600, 'temp': 0.20, 'depth': '综合权衡上升时间、超调、稳态静差与 PWM 饱和占比。'},
+    'high':   {'label': '深度', 'en': 'High',   'default_rounds': 8,  'max_tokens': 850, 'temp': 0.16, 'depth': '深度对比历史轮次敏感度、共模/差模耦合与抗饱和裕度。'},
+    'max':    {'label': '极限', 'en': 'Max',    'default_rounds': 10, 'max_tokens': 1100, 'temp': 0.12, 'depth': '逐项做精细物理诊断，分析相位滞后、静摩擦死区、转向优先饱和转移与多轮稳定裕度。'},
+}
+
+
+def normalize_effort(val: Any) -> str:
+    key = str(val or 'medium').strip().lower()
+    return key if key in REASONING_LEVELS else 'medium'
+
 
 def _finite_float(val: Any, name: str) -> float:
     if isinstance(val, bool) or not isinstance(val, (int, float, str)):
@@ -945,13 +958,17 @@ def call_llm_proposal(
     best_record: dict[str, Any] | None,
     goal: str,
     user_note: str,
+    reasoning_effort: str = 'medium',
     timeout_s: float = 25.0,
 ) -> dict[str, Any]:
     """Request next bounded parameter proposal from OpenAI-compatible, Ollama, or Anthropic API."""
     profile = LOOP_PROFILES[loop_id]
+    eff_key = normalize_effort(reasoning_effort)
+    eff_cfg = REASONING_LEVELS[eff_key]
     system_prompt = (
         '你是 TC264 智能车（差速视觉车，支持两串一并 2S1P 与传统三串）控制整定工程师。'
         '根据实测阶跃指标和历史轮次，给出下一轮有界参数建议。\n'
+        f'当前推理强度：{eff_cfg["label"]} ({eff_cfg["en"]}) — {eff_cfg["depth"]}\n'
         '硬性规则：\n'
         '1. 只调整当前环路声明的参数，绝对不能超出 min/max 和单轮 max_step。\n'
         '2. 优先保留已验证有效的参数，不要无依据清零积分或前馈；已经验证变差的方向不要重复试。\n'
@@ -1055,6 +1072,279 @@ def call_llm_proposal(
         'analysis_summary': str(obj.get('analysis_summary') or '模型已给出下一轮参数建议。')[:280],
         'guardrail_notes': notes,
         'source': prov,
+    }
+
+
+def _build_offline_chat_reply(
+    *,
+    message: str,
+    loop_id: str,
+    gp1: dict[str, Any] | None,
+    vbat_mv: int | None,
+    live: dict[str, Any],
+    history: list[dict[str, Any]],
+    best: dict[str, Any] | None,
+    bounds: dict[str, dict[str, float]],
+    effort: str,
+    dry_mode: bool,
+) -> dict[str, Any]:
+    """Zero-API-key local smart-car tuning advisor with live telemetry & bounded gain proposals."""
+    profile = LOOP_PROFILES[loop_id]
+    eff_cfg = REASONING_LEVELS[effort]
+    text = (message or '').strip()
+    low_txt = text.lower()
+    cur = extract_params_for_loop(gp1, loop_id) if gp1 else None
+    last_rec = history[-1] if history else None
+    last_m = (last_rec or {}).get('metrics') or {}
+
+    insights: list[str] = []
+    suggested: dict[str, float] | None = None
+    notes: list[str] = []
+
+    if vbat_mv is not None and vbat_mv >= VBAT_USB_MV:
+        v = vbat_mv / 1000.0
+        if v < 11.70:
+            insights.append(f'电池提示：当前 3S 电压 {v:.2f} V 偏低，开负压或大角速度阶跃可能触发限幅或掉速，建议换满电。')
+        elif effort in ('high', 'max'):
+            insights.append(f'供电正常：3S 电池 {v:.2f} V，动力裕度充足。')
+
+    if cur:
+        p_str = ' / '.join(f'{k}={v}' for k, v in cur.items())
+        insights.append(f'当前环路「{profile["label"]}」实读参数：{p_str}（{("干地限幅" if dry_mode else "标准范围")}）。')
+    else:
+        insights.append('尚未同步到车端 @GP1 参数，建议先连接 MOCK0 或实车串口后再做实测整定。')
+
+    # Live telemetry commentary
+    pwm_cm = live.get('pwmCm')
+    pwm_dm = live.get('pwmDm')
+    gyro = live.get('gyro')
+    spd = live.get('spd')
+    if isinstance(pwm_cm, (int, float)) and isinstance(pwm_dm, (int, float)) and (abs(pwm_cm) > 10 or abs(pwm_dm) > 10):
+        sat_peak = max(abs(pwm_cm + pwm_dm), abs(pwm_cm - pwm_dm))
+        insights.append(f'实时母线分配：纵向共模 PWM≈{pwm_cm:.0f}，转向差模 PWM≈{pwm_dm:.0f}（单轮峰值≈{sat_peak:.0f}/8500）。')
+
+    if last_m:
+        insights.append(
+            f'最近实测（第 {last_rec["round"]} 轮，{last_m.get("status", "—")}）：'
+            f'上升 {last_m.get("rise_ms", "—")} ms · 超调 {last_m.get("overshoot_pct", "—")}% · '
+            f'静差 {last_m.get("steady_err_pct", "—")}% · 饱和 {last_m.get("pwm_sat_pct", "—")}%。'
+        )
+
+    # Intent-aware engineering advice + bounded candidate proposal
+    want_damp = any(w in low_txt for w in ('超调', '震荡', '振荡', '晃', '抖', '摆尾', '抽风', '稳', '柔', 'overshoot', 'oscillat'))
+    want_fast = any(w in low_txt for w in ('慢', '滞后', '响应', '激进', '快', '跟不上', '拉高', '提速', 'faster', 'slow'))
+    want_steady = any(w in low_txt for w in ('静差', '偏低', '差一点', '不到目标', '稳态', '前馈', 'steady'))
+    want_dry = any(w in low_txt for w in ('干地', '无负压', '打滑', 'dry'))
+    want_suction = any(w in low_txt for w in ('负压', '吸盘', '抓地', 'suction'))
+
+    reply_lines: list[str] = []
+    if want_dry and loop_id == 'yaw_2s1p' and cur:
+        target_p = {'yff': cur['yff'], 'ykp': min(6.5, cur['ykp']), 'yki': 0.0}
+        suggested, notes = check_and_clamp_proposal(cur, target_p, bounds, strict=False)
+        reply_lines.append('两串一并干地（0% 负压）抓地力明显低于开负压状态，直出角速度 Kp 过高会引发原地抽振；建议先往 Kp≈6.5、Ki=0 靠拢，并保留 Kff≈1.85 维持转向起手响应。')
+    elif want_suction and loop_id == 'yaw_2s1p' and cur:
+        target_p = {'yff': 1.85, 'ykp': min(18.0, cur['ykp'] + bounds['ykp']['max_step']), 'yki': 0.0}
+        suggested, notes = check_and_clamp_proposal(cur, target_p, bounds, strict=False)
+        reply_lines.append('开负压后轮胎侧向抓地显著增强，可把直出角速度 Kp 逐步推向 15~18、Kff 维持 1.85（循迹建议 Ki=0 避免入弯积分过冲）。单轮仍受护栏步长保护，可分步逼近。')
+    elif want_damp and cur:
+        prop = dict(cur)
+        for k in prop:
+            if 'kp' in k or 'dirp' in k:
+                prop[k] *= 0.84
+            elif 'ki' in k:
+                prop[k] *= 0.75
+            elif 'dird' in k:
+                prop[k] = prop[k] * 1.15 + 0.5
+        suggested, notes = check_and_clamp_proposal(cur, prop, bounds, strict=False)
+        reply_lines.append('抑制超调与摆动优先回调比例增益 15% 左右并压低积分累积（若为视觉外环则顺带补一点 Kd 阻尼）。下面已按当前环路安全步长生成一组保守收敛参数，你可以一键安全写入后立刻跑一趟 4 ms 阶跃复测。')
+    elif want_fast and cur:
+        prop = dict(cur)
+        for k in prop:
+            if 'kp' in k or 'dirp' in k:
+                prop[k] *= 1.22
+            elif k == 'yff':
+                prop[k] *= 1.10
+        suggested, notes = check_and_clamp_proposal(cur, prop, bounds, strict=False)
+        reply_lines.append('想加快响应先在 PWM 未顶满的前提下小步提升比例增益（两串一并角速度环可同步微补前馈 Kff 缩短相位滞后）。下方候选已通过步长护栏检查，写入后重点盯「共模/差模 PWM」是否提前触顶 8500。')
+    elif want_steady and cur:
+        prop = dict(cur)
+        if 'yff' in prop:
+            prop['yff'] *= 1.14
+        for k in prop:
+            if 'ki' in k:
+                prop[k] = prop[k] * 1.22 if prop[k] > 0.01 else bounds[k]['max_step'] * 0.4
+        suggested, notes = check_and_clamp_proposal(cur, prop, bounds, strict=False)
+        reply_lines.append('稳态静差优先区分原因：两串一并角速度环优先微调前馈 Kff（无相位滞后），均速/轮速环则适度增加 Ki；若 PWM 已接近 8500 饱和则加积分只会引发 windup 超调。')
+    elif cur and last_m:
+        rule_prop = build_rule_proposal(loop_id, cur, last_m, bounds, history, set(), 'balanced')
+        suggested = rule_prop['parameters']
+        notes = rule_prop.get('guardrail_notes', [])
+        reply_lines.append(f'结合最近一次 4 ms 阶跃实测：{rule_prop["analysis_summary"]}')
+        if effort in ('high', 'max'):
+            reply_lines.append(f'（{eff_cfg["label"]}诊断模式）公式参考：{profile["equations"]}。建议改参后立刻做同目标复测，确认第 2 阶跃沿的上升时间与超调同步改善再保留。')
+    else:
+        reply_lines.append(f'当前处于「{profile["label"]}」· {eff_cfg["label"]}推理档。你可以直接点「单步测基线」或「开始自动调参」采集 4 ms 阶跃，也可以直接告诉我车体体感（例如："入弯超调太大"、"响应偏慢"、"切干地限幅"），我会结合实时遥测给出安全步长内的参数建议。')
+        if isinstance(spd, (int, float)) and isinstance(gyro, (int, float)):
+            reply_lines.append(f'当前实时读数：均速 {spd:.1f} cnt/2ms，陀螺 {gyro:.1f} °/s。')
+
+    if best and effort in ('medium', 'high', 'max'):
+        b_str = ' / '.join(f'{k}={v}' for k, v in best['parameters'].items())
+        insights.append(f'历史最佳稳定点：第 {best["round"]} 轮（评分 {best["score"]} · {b_str}）。')
+
+    return {
+        'ok': True,
+        'provider': 'rule',
+        'model': f'内置循证诊断引擎 · {eff_cfg["label"]}',
+        'effort': effort,
+        'reply': '\n'.join(reply_lines),
+        'insights': insights,
+        'suggested_params': suggested,
+        'guardrail_notes': notes,
+        'loop': loop_id,
+    }
+
+
+def call_llm_chat(
+    *,
+    provider: str,
+    base_url: str,
+    model: str,
+    api_key: str,
+    reasoning_effort: str,
+    message: str,
+    chat_history: list[dict[str, str]],
+    loop_id: str,
+    gp1: dict[str, Any] | None,
+    vbat_mv: int | None,
+    live: dict[str, Any],
+    tune_history: list[dict[str, Any]],
+    best: dict[str, Any] | None,
+    bounds: dict[str, dict[str, float]],
+    dry_mode: bool,
+    timeout_s: float = 28.0,
+) -> dict[str, Any]:
+    """Conversational AI tuning copilot via stdlib urllib.request (OpenAI/Ollama/Anthropic)."""
+    profile = LOOP_PROFILES[loop_id]
+    eff_key = normalize_effort(reasoning_effort)
+    eff_cfg = REASONING_LEVELS[eff_key]
+    cur = extract_params_for_loop(gp1, loop_id) if gp1 else None
+
+    system_prompt = (
+        '你是嵌入在 TC264 智能车无线调参工作台（TunePro）里的资深控制工程搭档。'
+        '用户正一边盯着实时波形与摄像头画面，一边和你交流调参。\n'
+        f'当前推理强度：{eff_cfg["label"]} ({eff_cfg["en"]}) — {eff_cfg["depth"]}\n'
+        '请基于实时遥测、当前参数和最近阶跃数据直接给出工程见解（简体中文，条理清晰、拒绝废话）。\n'
+        '严格输出单个合法 JSON 对象：\n'
+        '{"reply": "你的主要中文回复与工程分析", "insights": ["最多3条精炼实时诊断要点"], '
+        '"suggested_params": {<可选：若建议改参，仅填当前环路声明参数名和数值，否则为 null>}}'
+    )
+    context_obj = {
+        'loop': loop_id,
+        'loop_label': profile['label'],
+        'equations': profile['equations'],
+        'dry_mode': dry_mode,
+        'vbat_v': round(vbat_mv / 1000.0, 2) if (vbat_mv and vbat_mv >= VBAT_USB_MV) else None,
+        'current_parameters': cur,
+        'bounds': bounds,
+        'live_telemetry': live,
+        'recent_rounds': tune_history[-4:],
+        'best_verified': ({'round': best['round'], 'parameters': best['parameters'], 'score': best['score']} if best else None),
+    }
+
+    msgs: list[dict[str, str]] = []
+    for item in (chat_history or [])[-6:]:
+        role = 'assistant' if item.get('role') == 'assistant' else 'user'
+        txt = str(item.get('text') or '').strip()[:600]
+        if txt:
+            msgs.append({'role': role, 'content': txt})
+    msgs.append({
+        'role': 'user',
+        'content': f'【实时车端上下文】{json.dumps(context_obj, ensure_ascii=False)}\n\n【用户消息】{message}',
+    })
+
+    prov = provider.strip().lower()
+    url = base_url.strip().rstrip('/')
+    headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.3'}
+
+    if prov == 'anthropic':
+        endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
+        headers['x-api-key'] = api_key
+        headers['anthropic-version'] = '2023-06-01'
+        used_model = model or 'claude-3-5-sonnet-latest'
+        body: dict[str, Any] = {
+            'model': used_model,
+            'max_tokens': eff_cfg['max_tokens'],
+            'temperature': eff_cfg['temp'],
+            'system': system_prompt,
+            'messages': msgs,
+        }
+    else:
+        if prov == 'ollama' and not url:
+            url = 'http://127.0.0.1:11434/v1'
+        if not url:
+            url = 'https://api.openai.com/v1'
+        endpoint = url if url.endswith('/chat/completions') else f'{url}/chat/completions'
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        used_model = model or ('qwen2.5:7b' if prov == 'ollama' else 'gpt-4o-mini')
+        body = {
+            'model': used_model,
+            'temperature': eff_cfg['temp'],
+            'max_tokens': eff_cfg['max_tokens'],
+            'messages': [{'role': 'system', 'content': system_prompt}, *msgs],
+        }
+        # Pass reasoning_effort cleanly for compatible OpenAI reasoning models
+        low_m = used_model.lower()
+        if prov == 'openai' and any(tok in low_m for tok in ('o1', 'o3', 'o4', 'gpt-5', 'gpt-6', 'reasoner')):
+            body['reasoning_effort'] = 'high' if eff_key == 'max' else ('low' if eff_key == 'fast' else eff_key)
+
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
+        headers=headers,
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        raw = resp.read().decode('utf-8', errors='replace')
+    parsed = json.loads(raw)
+
+    if prov == 'anthropic':
+        blocks = parsed.get('content', [])
+        text = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
+    else:
+        choices = parsed.get('choices') or []
+        msg_obj = choices[0].get('message', {}) if choices else {}
+        text = str(msg_obj.get('content') or '')
+
+    obj = extract_json_object(text)
+    if obj and isinstance(obj.get('reply'), str):
+        reply_txt = obj['reply'].strip()
+        raw_ins = obj.get('insights') if isinstance(obj.get('insights'), list) else []
+        insights = [str(x).strip()[:200] for x in raw_ins if str(x).strip()][:4]
+        raw_prop = obj.get('suggested_params') if isinstance(obj.get('suggested_params'), dict) else None
+    else:
+        reply_txt = text.strip() or '模型未返回有效文本。'
+        insights = []
+        raw_prop = None
+
+    suggested = None
+    notes: list[str] = []
+    if raw_prop and cur:
+        try:
+            suggested, notes = check_and_clamp_proposal(cur, raw_prop, bounds, strict=False)
+        except Exception:
+            suggested = None
+
+    return {
+        'ok': True,
+        'provider': prov,
+        'model': used_model,
+        'effort': eff_key,
+        'reply': reply_txt,
+        'insights': insights,
+        'suggested_params': suggested,
+        'guardrail_notes': notes,
+        'loop': loop_id,
     }
 
 
@@ -1680,7 +1970,9 @@ class AITunerManager:
         t_lo, t_hi = profile['target_bounds']
         target = int(max(t_lo, min(t_hi, int(cfg.get('target') or profile['default_target']))))
         low = int(cfg.get('low') if cfg.get('low') is not None else profile['default_low'])
-        max_rounds = int(max(2, min(12, int(cfg.get('max_rounds') or 6))))
+        effort = normalize_effort(cfg.get('reasoning_effort'))
+        eff_cfg = REASONING_LEVELS[effort]
+        max_rounds = int(max(2, min(12, int(cfg.get('max_rounds') or eff_cfg['default_rounds']))))
         goal = str(cfg.get('goal') or 'balanced')
         if goal not in GOAL_PRESETS:
             goal = 'balanced'
@@ -1698,6 +1990,7 @@ class AITunerManager:
             'base_url': str(cfg.get('base_url') or '').strip(),
             'model': str(cfg.get('model') or '').strip(),
             'api_key': api_key.strip(),
+            'reasoning_effort': effort,
             'target': target,
             'low': low,
             'max_rounds': max_rounds,
@@ -1881,6 +2174,7 @@ class AITunerManager:
                             best_record=best,
                             goal=cfg['goal'],
                             user_note=cfg['user_note'],
+                            reasoning_effort=cfg.get('reasoning_effort', 'medium'),
                         )
                     except Exception as exc:
                         fallback_note = f'LLM 调用失败（{str(exc)[:80]}），已切保守规则兜底。'
@@ -1929,6 +2223,89 @@ class AITunerManager:
                 finished_at=time.strftime('%H:%M:%S'),
                 message=final_msg,
             )
+
+
+    def chat(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        message = str(cfg.get('message') or '').strip()
+        if not message:
+            raise ValueError('请输入要和 AI 讨论的内容。')
+        loop_id = str(cfg.get('loop') or self._state.get('loop') or 'yaw_2s1p')
+        if loop_id not in LOOP_PROFILES:
+            loop_id = 'yaw_2s1p'
+        provider = str(cfg.get('provider') or 'rule').strip().lower()
+        if provider not in ('rule', 'openai', 'ollama', 'anthropic'):
+            provider = 'rule'
+        effort = normalize_effort(cfg.get('reasoning_effort'))
+        dry_mode = bool(cfg.get('dry_mode', False))
+        bounds = get_loop_bounds(loop_id, dry_mode=dry_mode)
+
+        gp1 = None
+        if self.bridge.status().get('connected'):
+            try:
+                gp1 = self.session.gp1 or self.session.sync_gp1(timeout_s=1.0)
+            except Exception:
+                gp1 = self.session.gp1
+
+        live = cfg.get('live_telemetry') if isinstance(cfg.get('live_telemetry'), dict) else {}
+        with self._lock:
+            tune_history = deepcopy(self._state.get('history', []))
+            best = deepcopy(self._state.get('best'))
+
+        if provider == 'rule':
+            return _build_offline_chat_reply(
+                message=message,
+                loop_id=loop_id,
+                gp1=gp1,
+                vbat_mv=self.session.vbat_mv,
+                live=live,
+                history=tune_history,
+                best=best,
+                bounds=bounds,
+                effort=effort,
+                dry_mode=dry_mode,
+            )
+
+        api_key = str(cfg.get('api_key') or '').strip()
+        if not api_key:
+            if provider == 'anthropic':
+                api_key = os.environ.get('TUNEPRO_AI_API_KEY') or os.environ.get('ANTHROPIC_API_KEY') or ''
+            elif provider == 'openai':
+                api_key = os.environ.get('TUNEPRO_AI_API_KEY') or os.environ.get('OPENAI_API_KEY') or ''
+
+        try:
+            return call_llm_chat(
+                provider=provider,
+                base_url=str(cfg.get('base_url') or '').strip(),
+                model=str(cfg.get('model') or '').strip(),
+                api_key=api_key.strip(),
+                reasoning_effort=effort,
+                message=message,
+                chat_history=cfg.get('history') if isinstance(cfg.get('history'), list) else [],
+                loop_id=loop_id,
+                gp1=gp1,
+                vbat_mv=self.session.vbat_mv,
+                live=live,
+                tune_history=tune_history,
+                best=best,
+                bounds=bounds,
+                dry_mode=dry_mode,
+            )
+        except Exception as exc:
+            fallback = _build_offline_chat_reply(
+                message=message,
+                loop_id=loop_id,
+                gp1=gp1,
+                vbat_mv=self.session.vbat_mv,
+                live=live,
+                history=tune_history,
+                best=best,
+                bounds=bounds,
+                effort=effort,
+                dry_mode=dry_mode,
+            )
+            fallback['fallback_used'] = True
+            fallback['insights'] = [f'外部模型未响应（{str(exc)[:72]}），已自动切内置诊断引擎回复。', *fallback['insights']]
+            return fallback
 
 
 AI_TUNER = AITunerManager(serial_bridge.BRIDGE)

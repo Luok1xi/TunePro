@@ -79,7 +79,7 @@ class AppServer(ThreadingHTTPServer):
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = 'TC264TunePro/1.1'
+    server_version = 'TC264TunePro/1.3'
 
     def log_message(self, fmt, *args):
         pass
@@ -151,7 +151,7 @@ class AppHandler(BaseHTTPRequestHandler):
             path = parsed.path
             qs = urllib.parse.parse_qs(parsed.query)
             if path == '/api/health':
-                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.1', 'demo': DEMO_MODE, 'ai_tuner': True})
+                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.3', 'demo': DEMO_MODE, 'ai_tuner': True, 'ai_chat': True})
             if path == '/api/serial/ports':
                 return self._send_json({
                     'ports': serial_bridge.list_serial_ports(include_demo=True, demo_first=DEMO_MODE),
@@ -244,6 +244,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     allow_real_car=bool(body.get('allow_real_car', False)),
                     confirm_wheels_off_ground=bool(body.get('confirm_wheels_off_ground', False)),
                 ))
+            if path == '/api/ai/chat':
+                return self._send_json(ai_tuner.AI_TUNER.chat(body))
             if path == '/api/app/shutdown':
                 SHUTDOWN_EV.set()
                 threading.Timer(0.15, self.server.shutdown).start()

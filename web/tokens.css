@@ -42,15 +42,21 @@
   --c-fill: rgba(242, 241, 237, 0.055);
   --c-fill-2: rgba(242, 241, 237, 0.105);
 
-  /* Physical Frosted Glass Optics (Dark) */
-  --glass-bg: rgba(26, 26, 31, 0.62);
-  --glass-bg-strong: rgba(24, 24, 29, 0.78);
-  --glass-nav: rgba(16, 16, 18, 0.74);
-  --glass-blur: blur(26px) saturate(180%);
-  --glass-rim-top: rgba(255, 255, 255, 0.19);
-  --glass-rim-edge: rgba(255, 255, 255, 0.09);
-  --glass-sheen: rgba(255, 255, 255, 0.075);
-  --glass-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.68), 0 4px 14px -4px rgba(0, 0, 0, 0.36);
+  /* Physical Optical Glass Surfaces (Dark — zero-readback gradient face for 60/120 FPS) */
+  --glass-bg: rgba(24, 24, 29, 0.84);
+  --glass-face-hi: rgba(33, 33, 40, 0.88);
+  --glass-face-lo: rgba(20, 20, 25, 0.86);
+  --glass-bg-strong: rgba(22, 22, 28, 0.88);
+  --glass-nav: rgba(16, 16, 18, 0.78);
+  --glass-popover: rgba(24, 24, 31, 0.96);
+  --glass-blur: blur(20px) saturate(180%);
+  --glass-rim-top: rgba(255, 255, 255, 0.17);
+  --glass-rim-edge: rgba(255, 255, 255, 0.085);
+  --glass-sheen: rgba(255, 255, 255, 0.068);
+  --glass-shadow: 0 22px 54px -26px rgba(0, 0, 0, 0.68), 0 4px 12px -4px rgba(0, 0, 0, 0.34);
+
+  /* Active Loop Orbit Light Color (switched via html[data-active-loop]) */
+  --loop-glow: #3fd08b;
 
   /* Disciplined Accent Economy: Vermilion Signal + Precision Blue + Status Emerald */
   --c-accent: #e46b3e;
@@ -147,14 +153,19 @@ html[data-theme="light"] {
   --c-fill: rgba(18, 18, 20, 0.045);
   --c-fill-2: rgba(18, 18, 20, 0.085);
 
-  /* Physical Frosted Glass Optics (Light Paper Gallery) */
-  --glass-bg: rgba(250, 249, 246, 0.70);
-  --glass-bg-strong: rgba(252, 251, 248, 0.86);
-  --glass-nav: rgba(239, 238, 235, 0.80);
-  --glass-rim-top: rgba(255, 255, 255, 0.88);
-  --glass-rim-edge: rgba(18, 18, 20, 0.09);
-  --glass-sheen: rgba(255, 255, 255, 0.52);
-  --glass-shadow: 0 20px 50px -24px rgba(18, 18, 20, 0.18), 0 2px 8px -2px rgba(18, 18, 20, 0.06);
+  /* Physical Optical Glass Surfaces (Light Paper Gallery — zero-readback gradient face) */
+  --glass-bg: rgba(251, 250, 247, 0.90);
+  --glass-face-hi: rgba(255, 255, 253, 0.94);
+  --glass-face-lo: rgba(246, 244, 239, 0.90);
+  --glass-bg-strong: rgba(253, 252, 249, 0.92);
+  --glass-nav: rgba(239, 238, 235, 0.86);
+  --glass-popover: rgba(255, 255, 254, 0.97);
+  --glass-rim-top: rgba(255, 255, 255, 0.96);
+  --glass-rim-edge: rgba(18, 18, 20, 0.095);
+  --glass-sheen: rgba(255, 255, 255, 0.50);
+  --glass-shadow: 0 18px 44px -24px rgba(18, 18, 20, 0.18), 0 2px 8px -2px rgba(18, 18, 20, 0.06);
+
+  --loop-glow: #1f8a4c;
 
   --c-accent: #d95926;
   --c-accent-strong: #c2491a;
@@ -188,6 +199,11 @@ html[data-theme="light"] {
   --rl-bad: #c93b32;
   --rl-idle: #8a8881;
 }
+
+/* ---------- Active Loop Dynamic Beam Color ---------- */
+html[data-active-loop="speed"] { --loop-glow: var(--c-emerald); }
+html[data-active-loop="yaw"]   { --loop-glow: var(--c-accent); }
+html[data-active-loop="outer"] { --loop-glow: var(--c-cobalt); }
 
 /* ---------- Motion Intensity Tiers ---------- */
 html[data-motion="subtle"] {

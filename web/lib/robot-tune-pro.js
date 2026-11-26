@@ -6,6 +6,7 @@
 import { esc } from './esc.js';
 import { commands, parseQuickCommand, STOP_REASONS } from './robot-live-model.js';
 import { VBAT_COMP_MIN, VBAT_USB } from './robot-live-data.js';
+import { mountFluidTabs } from './robot-optics.js';
 
 const MODE_NAMES = ['外环循迹', '速度环·左轮', '速度环·右轮', '均速/双轮', '角速度·正向', '角速度·反向', '速度·多阶阶跃', '角速度·正反阶跃'];
 const WHEEL_NAMES = ['左轮', '右轮', '双轮'];
@@ -59,6 +60,8 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
   host.className = 'rtp-panel';
   host.dataset.activeLoop = activeTab;
   host.dataset.running = 'false';
+  document.documentElement.dataset.activeLoop = activeTab;
+  if (stageHost) stageHost.dataset.activeLoop = activeTab;
 
   const stageHTML = `
     <div class="rtp-stage" data-rtp-stage>
@@ -73,9 +76,9 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
     <div class="rtp-img-bar" aria-label="实时压缩图传">
       <div class="rl-seg" role="group">
         <button type="button" data-rtp-img="0" aria-pressed="true" disabled>关</button>
-        <button type="button" data-rtp-img="1" aria-pressed="false" disabled title="188×120 二值图 RLE 压缩，115200 无线可达 8~12 FPS">二值 RLE</button>
-        <button type="button" data-rtp-img="2" aria-pressed="false" disabled title="94×60 4位灰度压缩，无线约 3 FPS">灰 94×60</button>
-        <button type="button" data-rtp-img="3" aria-pressed="false" disabled title="47×30 8位灰度压缩，无线约 6 FPS">灰 47×30</button>
+        <button type="button" data-rtp-img="1" aria-pressed="false" disabled title="188×120 二值图 RLE 压缩，115200 无线可达 8~12 FPS">二值</button>
+        <button type="button" data-rtp-img="2" aria-pressed="false" disabled title="94×60 4位灰度压缩，无线约 3 FPS">灰94</button>
+        <button type="button" data-rtp-img="3" aria-pressed="false" disabled title="47×30 8位灰度压缩，无线约 6 FPS">灰47</button>
       </div>
       <select data-rtp-img-fps aria-label="图传帧率" disabled>
         ${[2, 4, 6, 10, 15].map(f => `<option value="${f}"${f === 6 ? ' selected' : ''}>${f} fps</option>`).join('')}
@@ -128,45 +131,11 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
     </div>
 
     <div class="rtp-body">
-      <!-- Tab 1: 均速并联环 / 速度内环 -->
+      <!-- Tab 1: 均速并联环 / 速度内环（滑条置顶，紧邻实时曲线与画面） -->
       <section class="rtp-tab-panel" data-rtp-panel="speed">
-        <p class="rtp-guide" data-guide-speed></p>
         <div class="rtp-controls-grid">
-          <div class="rtp-box">
-            <h5>轮侧 · 持续热切速 · 负压 <small data-speed-mode-badge>2S1P 并联支路</small></h5>
-            <div class="rl-row">
-              <span class="rtp-mini-label">指定车轮</span>
-              <div class="rl-seg" role="group">
-                <button type="button" data-rtp-wheel="2" aria-pressed="true" disabled>双轮均速</button>
-                <button type="button" data-rtp-wheel="0" aria-pressed="false" disabled>左轮</button>
-                <button type="button" data-rtp-wheel="1" aria-pressed="false" disabled>右轮</button>
-              </div>
-              <span class="rtp-mini-label" style="margin-left:4px">方式</span>
-              <div class="rl-seg" role="group">
-                <button type="button" data-rtp-step="3" aria-pressed="true" disabled title="一直转直到手动停车，运行中可随时无停顿变速和改 PID">持续运转</button>
-                <button type="button" data-rtp-step="1" aria-pressed="false" disabled title="0→低档→高档→低档→0（3.2s），自动跳过首沿静摩擦">多阶阶跃</button>
-                <button type="button" data-rtp-step="0" aria-pressed="false" disabled title="0→目标→0（2s 定时单步）">单步定时</button>
-              </div>
-            </div>
-            <div class="rtp-preset-row">
-              <span class="rtp-mini-label">一键直切</span>
-              ${[0, 60, 100, 140, 180, 220, 260].map(v => `<button type="button" class="rtp-chip${v === 0 ? ' rtp-chip-zero' : ''}" data-rtp-run-speed="${v}" disabled>${v === 0 ? '0 降零' : v}</button>`).join('')}
-            </div>
-            <div class="rl-row">
-              <label>目标速 <input type="number" data-rtp-field="test_speed" min="0" max="350" step="10" value="140" disabled></label>
-              <button type="button" class="tp-btn-accent" data-rtp-go-speed disabled title="停着时直接持续转，转着时无缝切到该速度">转 / 切到此速</button>
-              <label title="仅多阶阶跃模式使用">低档 <input type="number" data-rtp-field="test_low" min="0" max="350" step="10" value="90" disabled></label>
-              <button type="button" data-rtp-apply-low disabled>改低档</button>
-            </div>
-            <div class="rl-row">
-              <label class="rtp-check"><input type="checkbox" data-rtp-field="tune_fan" disabled> 调参开启负压</label>
-              <label>负压 % <input type="number" data-rtp-field="fan_pct" min="0" max="80" step="5" value="40" disabled></label>
-              <button type="button" data-rtp-apply-fan disabled>应用负压</button>
-            </div>
-          </div>
-
-          <div class="rtp-box">
-            <h5><span data-speed-pid-title>均速并联环 PI（运行中无扰热生效）</span><small>80ms 自动节流</small></h5>
+          <div class="rtp-box rtp-pid-box">
+            <h5><span data-speed-pid-title>均速并联环 PI（运行中无扰热生效）</span><small>80ms 热节流</small></h5>
             <!-- 2S1P 模式同步均速滑条 -->
             <div data-vavg-block>
               ${gainRowHTML('vkp', '均速 Kp', 0, 80, 0.5, 38.0)}
@@ -180,95 +149,124 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
               ${gainRowHTML('rki', '右轮 Ki', 0, 10, 0.1, 1.5)}
             </div>
             <div class="rl-row rtp-gain-actions">
-              <button type="button" data-rtp-toggle-lr>展开左右独立微调</button>
+              <button type="button" data-rtp-toggle-lr>左右微调</button>
               <button type="button" data-rtp-copy-lr disabled title="把左轮 Kp/Ki 同步复制到右轮（运行中可用）">左→右同步</button>
-              <button type="button" data-rtp-undo disabled>撤销上次改动</button>
+              <button type="button" data-rtp-undo disabled>撤销</button>
               <button type="button" data-rtp-cap disabled title="停车后读取最近 4 秒 4ms 高清板载波形">取最近波形</button>
             </div>
           </div>
-        </div>
-      </section>
 
-      <!-- Tab 2: 角速度内环 -->
-      <section class="rtp-tab-panel" data-rtp-panel="yaw" hidden>
-        <p class="rtp-guide" data-guide-yaw></p>
-        <div class="rtp-controls-grid">
           <div class="rtp-box">
-            <h5>原地正反热切角速度 · 负压 <small data-yaw-mode-badge>直出 PWM_turn</small></h5>
+            <h5>轮侧 · 热切目标速 · 负压 <small data-speed-mode-badge>2S1P 并联支路</small></h5>
+            <div class="rtp-preset-row">
+              <span class="rtp-mini-label">一键直切</span>
+              ${[0, 60, 100, 140, 180, 220, 260].map(v => `<button type="button" class="rtp-chip${v === 0 ? ' rtp-chip-zero' : ''}" data-rtp-run-speed="${v}" disabled>${v === 0 ? '0 降零' : v}</button>`).join('')}
+            </div>
             <div class="rl-row">
-              <span class="rtp-mini-label">方式</span>
-              <div class="rl-seg" role="group">
-                <button type="button" data-rtp-yawstep="3" aria-pressed="true" disabled title="持续原地转，随时点正负角速度不停车直接反向">持续原地转</button>
-                <button type="button" data-rtp-yawstep="2" aria-pressed="false" disabled title="0 → +ω → −ω → +ω → 0（3.2s 自动交替）">自动正反阶跃</button>
-                <button type="button" data-rtp-yawstep="0" aria-pressed="false" disabled title="2s 定时单步">单步定时</button>
+              <label>目标速 <input type="number" data-rtp-field="test_speed" min="0" max="350" step="10" value="140" disabled></label>
+              <button type="button" class="tp-btn-accent" data-rtp-go-speed disabled title="停着时直接持续转，转着时无缝切到该速度">转 / 切速</button>
+              <label title="仅多阶阶跃模式使用">低档 <input type="number" data-rtp-field="test_low" min="0" max="350" step="10" value="90" disabled></label>
+              <button type="button" data-rtp-apply-low disabled>改低档</button>
+            </div>
+            <div class="rl-row">
+              <div class="rl-seg" role="group" aria-label="指定车轮">
+                <button type="button" data-rtp-wheel="2" aria-pressed="true" disabled>双轮</button>
+                <button type="button" data-rtp-wheel="0" aria-pressed="false" disabled>左轮</button>
+                <button type="button" data-rtp-wheel="1" aria-pressed="false" disabled>右轮</button>
+              </div>
+              <div class="rl-seg" role="group" aria-label="测试方式">
+                <button type="button" data-rtp-step="3" aria-pressed="true" disabled title="一直转直到手动停车，运行中可随时无停顿变速和改 PID">持续</button>
+                <button type="button" data-rtp-step="1" aria-pressed="false" disabled title="0→低档→高档→低档→0（3.2s），自动跳过首沿静摩擦">多阶</button>
+                <button type="button" data-rtp-step="0" aria-pressed="false" disabled title="0→目标→0（2s 定时单步）">单步</button>
               </div>
             </div>
-            <div class="rtp-preset-row">
-              <span class="rtp-mini-label">一键正反</span>
-              ${[-450, -300, -200, 0, 200, 300, 450, 550].map(w => `<button type="button" class="rtp-chip${w === 0 ? ' rtp-chip-zero' : ''}" data-rtp-run-yaw="${w}" disabled>${w > 0 ? `+${w}` : w === 0 ? '0 降零' : w}</button>`).join('')}
-            </div>
             <div class="rl-row">
-              <label>角速度 °/s <input type="number" data-rtp-field="test_yaw" min="-600" max="600" step="20" value="300" disabled></label>
-              <button type="button" class="tp-btn-accent" data-rtp-go-yaw disabled>转 / 切到此角速</button>
-            </div>
-            <div class="rl-row">
-              <label class="rtp-check"><input type="checkbox" data-rtp-field="tune_fan_yaw" disabled> 调参开启负压</label>
-              <label>负压 % <input type="number" data-rtp-field="fan_pct_yaw" min="0" max="80" step="5" value="40" disabled></label>
-              <button type="button" data-rtp-apply-fan-yaw disabled>应用负压</button>
+              <label class="rtp-check"><input type="checkbox" data-rtp-field="tune_fan" disabled> 负压</label>
+              <label><input type="number" data-rtp-field="fan_pct" min="0" max="80" step="5" value="40" disabled> %</label>
+              <button type="button" data-rtp-apply-fan disabled>应用负压</button>
             </div>
           </div>
+        </div>
+        <p class="rtp-guide" data-guide-speed></p>
+      </section>
 
-          <div class="rtp-box">
+      <!-- Tab 2: 角速度内环（滑条置顶，边看陀螺波形与画面边热调） -->
+      <section class="rtp-tab-panel" data-rtp-panel="yaw" hidden>
+        <div class="rtp-controls-grid">
+          <div class="rtp-box rtp-pid-box">
             <h5><span data-yaw-pid-title>角速度串级内环 · 直出 PWM 增益</span><small data-yaw-unit>PWM / (°/s)</small></h5>
             <div data-yff-wrap>
               ${gainRowHTML('yff', '前馈 Kff', 0, 6.0, 0.05, 1.85)}
             </div>
             ${gainRowHTML('ykp', '角速度 Kp', 0, 40.0, 0.5, 18.0)}
             ${gainRowHTML('yki', '角速度 Ki', 0, 2.0, 0.02, 0.12)}
-            <div class="rl-row" data-yaw-presets>
-              <span class="rtp-mini-label">场景参考</span>
-              <button type="button" class="rtp-chip" data-yaw-preset="suction" disabled title="开负压高抓地参考：Kp=18.0, Kff=1.85, Ki=0">开负压 18.0</button>
-              <button type="button" class="rtp-chip" data-yaw-preset="dry" disabled title="0%负压干地柔顺参考：Kp=6.5, Kff=1.85, Ki=0">干地 6.5</button>
-            </div>
             <div class="rl-row rtp-gain-actions">
-              <button type="button" data-rtp-undo disabled>撤销上次改动</button>
-              <button type="button" data-rtp-cap disabled>取最近波形</button>
+              <span class="rl-row" data-yaw-presets>
+                <span class="rtp-mini-label">参考</span>
+                <button type="button" class="rtp-chip" data-yaw-preset="suction" disabled title="开负压高抓地参考：Kp=18.0, Kff=1.85, Ki=0">开负压 18.0</button>
+                <button type="button" class="rtp-chip" data-yaw-preset="dry" disabled title="0%负压干地柔顺参考：Kp=6.5, Kff=1.85, Ki=0">干地 6.5</button>
+              </span>
+              <button type="button" data-rtp-undo disabled>撤销</button>
+              <button type="button" data-rtp-cap disabled>取波形</button>
+            </div>
+          </div>
+
+          <div class="rtp-box">
+            <h5>原地正反热切角速度 · 负压 <small data-yaw-mode-badge>直出 PWM_turn</small></h5>
+            <div class="rtp-preset-row">
+              <span class="rtp-mini-label">一键正反</span>
+              ${[-450, -300, -200, 0, 200, 300, 450, 550].map(w => `<button type="button" class="rtp-chip${w === 0 ? ' rtp-chip-zero' : ''}" data-rtp-run-yaw="${w}" disabled>${w > 0 ? `+${w}` : w === 0 ? '0 降零' : w}</button>`).join('')}
+            </div>
+            <div class="rl-row">
+              <label>角速 °/s <input type="number" data-rtp-field="test_yaw" min="-600" max="600" step="20" value="300" disabled></label>
+              <button type="button" class="tp-btn-accent" data-rtp-go-yaw disabled>转 / 切角速</button>
+            </div>
+            <div class="rl-row">
+              <div class="rl-seg" role="group" aria-label="角速度测试方式">
+                <button type="button" data-rtp-yawstep="3" aria-pressed="true" disabled title="持续原地转，随时点正负角速度不停车直接反向">持续转</button>
+                <button type="button" data-rtp-yawstep="2" aria-pressed="false" disabled title="0 → +ω → −ω → +ω → 0（3.2s 自动交替）">正反阶跃</button>
+                <button type="button" data-rtp-yawstep="0" aria-pressed="false" disabled title="2s 定时单步">单步</button>
+              </div>
+              <label class="rtp-check"><input type="checkbox" data-rtp-field="tune_fan_yaw" disabled> 负压</label>
+              <label><input type="number" data-rtp-field="fan_pct_yaw" min="0" max="80" step="5" value="40" disabled>%</label>
+              <button type="button" data-rtp-apply-fan-yaw disabled>应用</button>
             </div>
           </div>
         </div>
+        <p class="rtp-guide" data-guide-yaw></p>
       </section>
 
-      <!-- Tab 3: 视觉外环 -->
+      <!-- Tab 3: 视觉外环（外环 PD 滑条置顶，紧邻实时摄像头画面） -->
       <section class="rtp-tab-panel" data-rtp-panel="outer" hidden>
-        <p class="rtp-guide" data-guide-outer></p>
         <div class="rtp-controls-grid">
+          <div class="rtp-box rtp-pid-box">
+            <h5>外环位置式 PD（盯着左侧画面实时热调）<small>可选 ±20 速度带</small></h5>
+            ${gainRowHTML('dirp_cur', '外环 Kp', 0, 40, 0.2, 8.5)}
+            ${gainRowHTML('dird_cur', '外环 Kd', 0, 120, 0.5, 6.0)}
+            <div class="rl-row rtp-gain-actions">
+              <label class="rtp-check"><input type="checkbox" data-rtp-band checked> 同步写入 ±20 速度带</label>
+              <button type="button" data-rtp-undo disabled>撤销</button>
+            </div>
+          </div>
+
           <div class="rtp-box">
             <h5>竞赛循迹模式与速度 / 偏航上限 <small>外环输出 ω_des</small></h5>
             <div class="rl-row">
-              <button type="button" class="tp-btn-accent" data-rtp-race-mode disabled>切回竞赛循迹（外环模式）</button>
+              <button type="button" class="tp-btn-accent" data-rtp-race-mode disabled>切回竞赛循迹</button>
               <span class="rl-sub" data-rtp-race-hint>当前模式：—</span>
             </div>
             <div class="rl-row">
-              <label>直道速 <input type="number" data-rtp-field="race_speed" min="40" max="350" step="5" value="125" disabled></label>
-              <label>弯道速 <input type="number" data-rtp-field="turn_speed" min="40" max="300" step="5" value="80" disabled></label>
-              <label>角速上限 <input type="number" data-rtp-field="yaw_cap" min="100" max="1500" step="20" value="920" disabled></label>
+              <label>直道 <input type="number" data-rtp-field="race_speed" min="40" max="350" step="5" value="125" disabled></label>
+              <label>弯道 <input type="number" data-rtp-field="turn_speed" min="40" max="300" step="5" value="80" disabled></label>
+              <label>角限 <input type="number" data-rtp-field="yaw_cap" min="100" max="1500" step="20" value="920" disabled></label>
             </div>
             <div class="rl-row">
               <label>负压 % <input type="number" data-rtp-field="fan_pct_outer" min="0" max="80" step="5" value="40" disabled></label>
               <button type="button" data-rtp-apply-outer disabled>应用速度与负压</button>
             </div>
           </div>
-
-          <div class="rtp-box">
-            <h5>外环位置式 PD（运行中可实时微调）<small>可选 ±20 速度带平滑写入</small></h5>
-            ${gainRowHTML('dirp_cur', '外环 Kp', 0, 40, 0.2, 8.5)}
-            ${gainRowHTML('dird_cur', '外环 Kd', 0, 120, 0.5, 6.0)}
-            <div class="rl-row rtp-gain-actions">
-              <label class="rtp-check"><input type="checkbox" data-rtp-band checked> 同步写入当前直道速 ±20 区间（平滑不跳变）</label>
-              <button type="button" data-rtp-undo disabled>撤销上次改动</button>
-            </div>
-          </div>
         </div>
+        <p class="rtp-guide" data-guide-outer></p>
       </section>
     </div>
   `;
@@ -291,13 +289,30 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
   const GAIN_SCALE = { vkp: 100, vki: 1000, lkp: 100, lki: 1000, rkp: 100, rki: 1000, yff: 1000, ykp: 10000, yki: 10000, dirp_cur: 1000, dird_cur: 1000 };
   const GAIN_DEC   = { vkp: 2,   vki: 3,    lkp: 2,   lki: 3,    rkp: 2,   rki: 3,    yff: 2,    ykp: 2,     yki: 3,     dirp_cur: 2,    dird_cur: 2 };
   let showLrIn2s1p = false;
+  let nodeValRefs = { outer: null, yaw: null, speed: null, mixer: null };
+  let nodeValCache = { outer: '', yaw: '', speed: '', mixer: '' };
+  const vbatElRef = $('[data-rtp-vbat]');
+  let lastVbatTxt = '', lastVbatLvl = '';
+
+  function updateVbatBadge() {
+    let txt = '电池 —', lvl = 'idle';
+    if (Number.isFinite(vbatMv) && vbatMv >= VBAT_USB) {
+      txt = `电池 ${(vbatMv / 1000).toFixed(2)} V${vbatMv < VBAT_COMP_MIN ? ' · 偏低!' : ''}`;
+      lvl = vbatMv < 10500 ? 'bad' : vbatMv < VBAT_COMP_MIN ? 'warn' : 'good';
+    } else if (Number.isFinite(vbatMv) && vbatMv > 0) {
+      txt = '仅 USB 供电';
+      lvl = 'warn';
+    }
+    if (txt !== lastVbatTxt) { lastVbatTxt = txt; vbatElRef.textContent = txt; }
+    if (lvl !== lastVbatLvl) { lastVbatLvl = lvl; vbatElRef.dataset.level = lvl; }
+  }
 
   function renderStageDiagram() {
     const is2s1p = topology === '2s1p';
-    $('[data-stage-title]').textContent = is2s1p ? '控制拓扑舞台 · 两串一并（2S1P）' : '控制拓扑舞台 · 传统三串（3-Cascade）';
+    $('[data-stage-title]').textContent = is2s1p ? '控制拓扑 · 两串一并（2S1P）' : '控制拓扑 · 传统三串（3-Cascade）';
     $('[data-stage-desc]').textContent = is2s1p
-      ? '两串转向直出 PWM_turn 绕过轮速环滞后 · 一并均速环 PWM_speed 直接并联叠加（+0.72 / -1.28 转向优先饱和转移）'
-      : '三级串联：视觉外环 → 角速度中环输出轮差 Δv → 左/右轮速独立 PI → 双轮 PWM';
+      ? '点击任意环切换环绕流光与对应滑条 · 转向直出 PWM_turn ∥ 纵向均速 PWM_speed'
+      : '点击任意环切换环绕流光与对应滑条 · 外环 → 角速度中环 → 左右轮速 PI';
     const flow = $('[data-stage-flow]');
     if (is2s1p) {
       flow.innerHTML = `
@@ -346,6 +361,13 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
           </span>
         </div>`;
     }
+    nodeValRefs = {
+      outer: flow.querySelector('[data-node-val="outer"]'),
+      yaw: flow.querySelector('[data-node-val="yaw"]'),
+      speed: flow.querySelector('[data-node-val="speed"]'),
+      mixer: flow.querySelector('[data-node-val="mixer"]'),
+    };
+    nodeValCache = { outer: '', yaw: '', speed: '', mixer: '' };
   }
 
   function applyTopologyUI() {
@@ -432,17 +454,7 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
     stateEl.textContent = !conn ? '未连接' : running ? (params?.step_mode === 3 ? '持续运转中' : '运行中') : stopReason ? `已停 · ${STOP_REASONS[stopReason] || '码 ' + stopReason}` : '已停稳';
     stateEl.dataset.level = !conn ? 'idle' : running ? 'good' : stopReason && stopReason !== 20 && stopReason !== 26 ? 'bad' : 'idle';
 
-    const vbatEl = $('[data-rtp-vbat]');
-    if (Number.isFinite(vbatMv) && vbatMv >= VBAT_USB) {
-      vbatEl.textContent = `电池 ${(vbatMv / 1000).toFixed(2)} V${vbatMv < VBAT_COMP_MIN ? ' · 偏低!' : ''}`;
-      vbatEl.dataset.level = vbatMv < 10500 ? 'bad' : vbatMv < VBAT_COMP_MIN ? 'warn' : 'good';
-    } else if (Number.isFinite(vbatMv) && vbatMv > 0) {
-      vbatEl.textContent = '仅 USB 供电';
-      vbatEl.dataset.level = 'warn';
-    } else {
-      vbatEl.textContent = '电池 —';
-      vbatEl.dataset.level = 'idle';
-    }
+    updateVbatBadge();
 
     const modeEl = $('[data-rtp-mode]');
     modeEl.textContent = params ? `${MODE_NAMES[params.mode] || params.mode} · ${STEP_NAMES[params.step_mode] || ''} · rev ${params.rev}` : '模式：待同步';
@@ -763,6 +775,8 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
   function switchTab(tab) {
     activeTab = tab;
     host.dataset.activeLoop = tab;
+    document.documentElement.dataset.activeLoop = tab;
+    if (stageHost) stageHost.dataset.activeLoop = tab;
     $$('[data-rtp-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.rtpTab === tab)));
     $$('[data-rtp-panel]').forEach(p => { p.hidden = p.dataset.rtpPanel !== tab; });
     $$('[data-jump-tab]').forEach(n => n.setAttribute('aria-current', String(n.dataset.jumpTab === tab)));
@@ -1000,28 +1014,29 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
   });
 
   applyTopologyUI();
+  mountFluidTabs($('.rtp-loop-tabs'), { kind: 'line' });
 
   return {
     setTopology,
     getVbatMv: () => vbatMv,
     updateTelemetry({ spd, encL, encR, gyro, yawTgt, errPx, pwmCm, pwmDm, pwmL, pwmR }) {
-      const nOut = $('[data-node-val="outer"]');
-      const nYaw = $('[data-node-val="yaw"]');
-      const nSpd = $('[data-node-val="speed"]');
-      const nMix = $('[data-node-val="mixer"]');
-      if (nOut && Number.isFinite(errPx)) nOut.textContent = `err ${errPx >= 0 ? '+' : ''}${errPx.toFixed(0)} px`;
-      if (nYaw && Number.isFinite(gyro)) nYaw.textContent = `${gyro.toFixed(0)} / ${Number.isFinite(yawTgt) ? yawTgt.toFixed(0) : '—'} °/s`;
-      if (nSpd && Number.isFinite(spd)) {
-        nSpd.textContent = topology === '2s1p'
+      const setNode = (k, txt) => {
+        const el = nodeValRefs[k];
+        if (!el || nodeValCache[k] === txt) return;
+        nodeValCache[k] = txt;
+        el.textContent = txt;
+      };
+      if (Number.isFinite(errPx)) setNode('outer', `err ${errPx >= 0 ? '+' : ''}${errPx.toFixed(0)} px`);
+      if (Number.isFinite(gyro)) setNode('yaw', `${gyro.toFixed(0)} / ${Number.isFinite(yawTgt) ? yawTgt.toFixed(0) : '—'} °/s`);
+      if (Number.isFinite(spd)) {
+        setNode('speed', topology === '2s1p'
           ? `v_avg ${spd.toFixed(0)} cnt`
-          : `L ${Number.isFinite(encL) ? encL.toFixed(0) : '—'} · R ${Number.isFinite(encR) ? encR.toFixed(0) : '—'}`;
+          : `L ${Number.isFinite(encL) ? encL.toFixed(0) : '—'} · R ${Number.isFinite(encR) ? encR.toFixed(0) : '—'}`);
       }
-      if (nMix) {
-        if (topology === '2s1p' && Number.isFinite(pwmCm) && Number.isFinite(pwmDm)) {
-          nMix.textContent = `CM ${Math.round(pwmCm)} · DM ${Math.round(pwmDm)}`;
-        } else if (Number.isFinite(pwmL) && Number.isFinite(pwmR)) {
-          nMix.textContent = `L ${Math.round(pwmL)} · R ${Math.round(pwmR)}`;
-        }
+      if (topology === '2s1p' && Number.isFinite(pwmCm) && Number.isFinite(pwmDm)) {
+        setNode('mixer', `CM ${Math.round(pwmCm)} · DM ${Math.round(pwmDm)}`);
+      } else if (Number.isFinite(pwmL) && Number.isFinite(pwmR)) {
+        setNode('mixer', `L ${Math.round(pwmL)} · R ${Math.round(pwmR)}`);
       }
     },
     onConnected() {
@@ -1090,6 +1105,7 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
       } else if (ev.type === 'm2') {
         const r = ev.row;
         const wasRunning = running;
+        const prevStop = stopReason;
         running = r.launch_flag === 1;
         stopReason = r.stop_reason;
         if (wasRunning && !running) {
@@ -1099,16 +1115,22 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
         if (params && Number.isFinite(r.cfg_rev) && r.cfg_rev !== params.rev && !flushing) {
           requestSync();
         }
-        updateUI();
+        // Only sweep UI controls when running/stop state actually transitions (eliminates 50Hz DOM storm!)
+        if (running !== wasRunning || stopReason !== prevStop) updateUI();
       } else if (ev.type === 'status') {
         const f = ev.fields;
-        if (Number.isFinite(f.vbat_mv)) vbatMv = f.vbat_mv;
-        if (f.tune === 1 && Number.isInteger(f.running)) {
-          running = f.running === 1;
-          if (!running) { remoteLaunched = false; stopWatchdog(); }
-          if (Number.isInteger(f.stop)) stopReason = f.stop;
+        if (Number.isFinite(f.vbat_mv)) {
+          vbatMv = f.vbat_mv;
+          updateVbatBadge();
         }
-        updateUI();
+        let changed = false;
+        if (f.tune === 1 && Number.isInteger(f.running)) {
+          const nextRun = f.running === 1;
+          if (nextRun !== running) { running = nextRun; changed = true; }
+          if (!running) { remoteLaunched = false; stopWatchdog(); }
+          if (Number.isInteger(f.stop) && f.stop !== stopReason) { stopReason = f.stop; changed = true; }
+        }
+        if (changed) updateUI();
       }
     },
     destroy() {

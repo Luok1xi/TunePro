@@ -6,7 +6,7 @@ import { createChart } from './lib/robot-live-charts.js';
 import { mountSpeedScope } from './lib/robot-speed-scope.js';
 import { mountTunePro } from './lib/robot-tune-pro.js';
 import { mountAiTuner } from './lib/robot-ai-tuner.js';
-import { mountOptics } from './lib/robot-optics.js';
+import { mountOptics, mountFluidTabs } from './lib/robot-optics.js';
 
 const $ = q => document.querySelector(q), $$ = q => document.querySelectorAll(q);
 const W = 188, H = 120, BAND = [50, 69];
@@ -144,12 +144,64 @@ const ingest = createIngest(store);
 let currentView = 'speed', spanSec = 10, following = true, viewEnd = 0, hoverT = null, dirty = true;
 let mainChart = null;
 let lastFrame = null, badCnt = 0, byteLog = [], frameTimes = [];
+let camImgData = null, camImg32 = null, camImgW = 0, camImgH = 0, lastGuideKey = '';
+let logsDirty = false;
 const logs = [];
 const MAX_LOGS = 800;
 
 const camCanvas = $('[data-cam-canvas]'), camOverlay = $('[data-cam-overlay]');
-const camCtx = camCanvas.getContext('2d'), ovCtx = camOverlay.getContext('2d');
+const camCtx = camCanvas.getContext('2d', { alpha: false }), ovCtx = camOverlay.getContext('2d');
+const logCard = $('[data-log-card]');
+const logCountEl = $('[data-log-count]');
+const logPreEl = $('[data-log-pre]');
+const logStatusChk = $('[data-log-status]');
+const guidesChk = $('[data-guides]');
+const readoutEl = $('[data-readout]');
+const diagEl = $('[data-diag]');
+const rateEl = $('[data-rate]');
+const linkEl = $('[data-link]');
 const speedScope = mountSpeedScope($('[data-speed-scope]'));
+
+// Cached KPI DOM references + diff map (zero redundant DOM writes at 5 Hz)
+const kpiRefs = {
+  speed: $('[data-kpi-speed]'),
+  speedSub: $('[data-kpi-speed-sub]'),
+  gyro: $('[data-kpi-gyro]'),
+  gyroSub: $('[data-kpi-gyro-sub]'),
+  pwm: $('[data-kpi-pwm]'),
+  pwmSub: $('[data-kpi-pwm-sub]'),
+  vis: $('[data-kpi-vis]'),
+  visSub: $('[data-kpi-vis-sub]'),
+  bat: $('[data-kpi-bat]'),
+  meters: {
+    speed: $('[data-kpi-meter="speed"]'),
+    gyro: $('[data-kpi-meter="gyro"]'),
+    pwm: $('[data-kpi-meter="pwm"]'),
+    vis: $('[data-kpi-meter="vis"]'),
+    bat: $('[data-kpi-meter="bat"]'),
+  },
+};
+const kpiCache = Object.create(null);
+function setTextCached(key, el, text) {
+  if (!el || kpiCache[key] === text) return;
+  kpiCache[key] = text;
+  el.textContent = text;
+}
+function setMeterCached(name, ratio, hot = false) {
+  const el = kpiRefs.meters[name];
+  if (!el) return;
+  const clamped = Number.isFinite(ratio) ? Math.max(-1, Math.min(1, ratio)) : 0;
+  const mStr = clamped.toFixed(3);
+  const hStr = String(Boolean(hot));
+  if (kpiCache[`m_${name}`] !== mStr) {
+    kpiCache[`m_${name}`] = mStr;
+    el.style.setProperty('--m', mStr);
+  }
+  if (kpiCache[`h_${name}`] !== hStr) {
+    kpiCache[`h_${name}`] = hStr;
+    el.dataset.hot = hStr;
+  }
+}
 
 let inspectorMode = 'manual';
 function setInspectorMode(mode) {
@@ -159,6 +211,21 @@ function setInspectorMode(mode) {
   aiTuner.setOpen(showAi);
   $$('[data-inspector-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.inspectorTab === inspectorMode)));
   $('[data-ai-toggle]').setAttribute('aria-expanded', String(showAi));
+}
+
+function getLiveTelemetrySnapshot() {
+  return {
+    spd: store.last('spd')?.v,
+    encL: store.last('encL')?.v,
+    encR: store.last('encR')?.v,
+    gyro: store.last('gyro_dps')?.v,
+    yawTgt: store.last('yaw_target_dps')?.v,
+    errPx: store.last('image_error')?.v,
+    pwmCm: store.last('pwm_cm')?.v,
+    pwmDm: store.last('pwm_dm')?.v,
+    pwmL: store.last('pwmL')?.v,
+    pwmR: store.last('pwmR')?.v,
+  };
 }
 
 const tunePro = mountTunePro($('[data-tune-pro]'), {
@@ -178,6 +245,7 @@ const tunePro = mountTunePro($('[data-tune-pro]'), {
 const aiTuner = mountAiTuner($('[data-ai-tuner]'), {
   getTransport: () => transport,
   isConnected,
+  getLiveTelemetry: getLiveTelemetrySnapshot,
   onLog: addLog,
   onFocusView: view => setPlotView(view),
   onStateBadge: ({ active, open }) => {
@@ -203,15 +271,17 @@ function addLog(kind, text) {
   const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}.${String(now.getMilliseconds()).padStart(3, '0')}`;
   logs.push({ kind, line: `${ts}  ${text}` });
   if (logs.length > MAX_LOGS) logs.splice(0, logs.length - MAX_LOGS);
-  renderLogs();
+  logsDirty = true;
+  if (logCard?.open) renderLogs();
 }
 function renderLogs() {
-  const showStatus = $('[data-log-status]').checked;
+  logsDirty = false;
+  setTextCached('logCount', logCountEl, `${logs.length} 条`);
+  if (!logCard?.open) return;
+  const showStatus = logStatusChk.checked;
   const list = logs.filter(l => showStatus || l.kind !== 'status').slice(-200);
-  $('[data-log-count]').textContent = `${logs.length} 条`;
-  const pre = $('[data-log-pre]');
-  pre.innerHTML = list.map(l => `<span data-k="${l.kind}">${esc(l.line)}</span>`).join('\n');
-  pre.scrollTop = pre.scrollHeight;
+  logPreEl.innerHTML = list.map(l => `<span data-k="${l.kind}">${esc(l.line)}</span>`).join('\n');
+  logPreEl.scrollTop = logPreEl.scrollHeight;
 }
 
 // ---------- 串口解析 ----------
@@ -266,7 +336,10 @@ async function refreshPorts() {
     const data = await r.json();
     const list = data.ports || [];
     sel.innerHTML = list.length
-      ? list.map(p => `<option value="${esc(p.port)}">${esc(p.port)} · ${esc(p.hint)}</option>`).join('')
+      ? list.map(p => {
+          const shortHint = p.port === 'MOCK0' ? '虚拟小车' : String(p.hint || '').replace(/（.*?）|\(.*?\)/g, '').slice(0, 14);
+          return `<option value="${esc(p.port)}" title="${esc(p.port)} · ${esc(p.hint)}">${esc(p.port)}${shortHint ? ` · ${esc(shortHint)}` : ''}</option>`;
+        }).join('')
       : '<option value="">未检测到串口</option>';
     if (data.status?.port && list.some(p => p.port === data.status.port)) sel.value = data.status.port;
     else if (data.demo && list.some(p => p.port === 'MOCK0')) sel.value = 'MOCK0';
@@ -397,6 +470,7 @@ function setPlotView(name) {
   currentView = name;
   $$('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === name)));
   const cfg = VIEWS[name];
+  mainChart?.destroy?.();
   mainChart = createChart($('[data-main-chart]'), store, { series: cfg.series, fixed: cfg.fixed, unit: cfg.unit });
   $('[data-legend]').innerHTML = cfg.series.map(s => `<span style="--c:var(${s.color})">${s.label}${s.axis === 'r' ? '（右轴）' : ''}</span>`).join('');
   dirty = true;
@@ -408,95 +482,110 @@ function getWindow() {
   return spanSec ? [end - spanSec * 1000, end] : [a, Math.max(end, a + 1000)];
 }
 
-// ---------- 实时摄像头绘制 ----------
+// ---------- 实时摄像头绘制（复用 Uint32Array 像素缓冲，零逐帧分配） ----------
 function drawFrame(f) {
-  const img = camCtx.createImageData(f.width, f.height);
-  for (let i = 0; i < f.pixels.length; i++) {
-    const v = f.kind === 'bin' ? (f.pixels[i] ? 255 : 0) : f.pixels[i];
-    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v;
-    img.data[i * 4 + 3] = 255;
+  if (!camImgData || camImgW !== f.width || camImgH !== f.height) {
+    camImgW = f.width;
+    camImgH = f.height;
+    camImgData = camCtx.createImageData(f.width, f.height);
+    camImg32 = new Uint32Array(camImgData.data.buffer);
+    if (camCanvas.width !== f.width || camCanvas.height !== f.height) {
+      camCanvas.width = camOverlay.width = f.width;
+      camCanvas.height = camOverlay.height = f.height;
+      lastGuideKey = '';
+    }
   }
-  camCanvas.width = camOverlay.width = f.width;
-  camCanvas.height = camOverlay.height = f.height;
-  camCtx.putImageData(img, 0, 0);
-  drawGuides();
+  const px = f.pixels, len = Math.min(px.length, camImg32.length);
+  if (f.kind === 'bin') {
+    for (let i = 0; i < len; i++) camImg32[i] = px[i] ? 0xFFFFFFFF : 0xFF000000;
+  } else {
+    for (let i = 0; i < len; i++) {
+      const v = px[i];
+      camImg32[i] = 0xFF000000 | (v << 16) | (v << 8) | v;
+    }
+  }
+  camCtx.putImageData(camImgData, 0, 0);
+  drawGuides(true);
   const fps = frameTimes.length >= 2 ? ((frameTimes.length - 1) * 1000 / Math.max(1, frameTimes.at(-1) - frameTimes[0])).toFixed(1) : '—';
   const tag = f.compressed ? ({ 1: '二值 RLE', 2: '二值 1bit', 3: '灰度 94×60', 4: '灰度 47×30' }[f.fmt] || '压缩') : (f.kind === 'bin' ? '二值' : '灰度');
   $('[data-cam-title]').textContent = `${tag} · #${f.seq} · ${fps} fps${f.compBytes ? ` · ${f.compBytes} B` : ''}`;
-  const s = frameStats(f.pixels);
   const m = f.meta;
-  $('[data-cam-stats]').innerHTML = m
-    ? `偏差 <b>${m.image_error} px</b> · 均灰 <b>${m.avg_gray}</b>${m.avg_gray > 175 ? ' <span data-level="warn">⚠ 反光偏亮</span>' : ''} · L/R <b>${m.lp}/${m.rp}</b> · 步 <b>k=${m.route_k}</b>`
-    : `最小 <b>${s.min}</b> · 中位 <b>${s.median}</b> · 最大 <b>${s.max}</b> · 过曝 <b>${s.saturated}</b>`;
+  if (m) {
+    $('[data-cam-stats]').innerHTML =
+      `偏差 <b>${m.image_error} px</b> · 均灰 <b>${m.avg_gray}</b>${m.avg_gray > 175 ? ' <span data-level="warn">⚠ 反光偏亮</span>' : ''} · L/R <b>${m.lp}/${m.rp}</b> · 步 <b>k=${m.route_k}</b>`;
+  } else {
+    const s = frameStats(f.pixels);
+    $('[data-cam-stats]').innerHTML = `最小 <b>${s.min}</b> · 中位 <b>${s.median}</b> · 最大 <b>${s.max}</b> · 过曝 <b>${s.saturated}</b>`;
+  }
   $('[data-save-png]').disabled = false;
 }
 
-function drawGuides() {
+function drawGuides(force = false) {
+  const show = guidesChk.checked;
+  const e = store.last('image_error');
+  const px = e ? e.v : lastFrame?.meta?.image_error;
+  const pxRound = Number.isFinite(px) ? Math.round(px) : 'n';
+  const key = `${show}|${camOverlay.width}|${camOverlay.height}|${pxRound}`;
+  if (!force && key === lastGuideKey) return;
+  lastGuideKey = key;
+
   ovCtx.clearRect(0, 0, camOverlay.width, camOverlay.height);
-  if (!$('[data-guides]').checked) return;
+  if (!show) return;
   const ky = camOverlay.height / H, kx = camOverlay.width / W;
   ovCtx.fillStyle = 'rgba(110,161,255,0.18)';
   ovCtx.fillRect(0, BAND[0] * ky, camOverlay.width, (BAND[1] - BAND[0] + 1) * ky);
   ovCtx.fillStyle = 'rgba(226,178,89,0.78)';
   ovCtx.fillRect(camOverlay.width / 2, 0, 1, camOverlay.height);
-  const e = store.last('image_error');
-  const px = e ? e.v : lastFrame?.meta?.image_error;
   if (Number.isFinite(px) && Math.abs(px) < W) {
     ovCtx.fillStyle = 'rgba(217,119,87,0.95)';
     ovCtx.fillRect(camOverlay.width / 2 + px * kx - 1, BAND[0] * ky, 2, (BAND[1] - BAND[0] + 1) * ky);
   }
 }
 
-function updateKPIStrip(kbs) {
+function updateKPIStrip() {
   const spd = store.last('spd')?.v, encL = store.last('encL')?.v, encR = store.last('encR')?.v;
   const gyro = store.last('gyro_dps')?.v, yawTgt = store.last('yaw_target_dps')?.v;
   const pwmCm = store.last('pwm_cm')?.v, pwmDm = store.last('pwm_dm')?.v, pwmL = store.last('pwmL')?.v, pwmR = store.last('pwmR')?.v;
   const errPx = store.last('image_error')?.v, routeK = store.last('route_k')?.v;
   const vbat = tunePro.getVbatMv();
 
-  function setMeter(name, ratio, hot = false) {
-    const el = $(`[data-kpi-meter="${name}"]`);
-    if (!el) return;
-    const clamped = Number.isFinite(ratio) ? Math.max(-1, Math.min(1, ratio)) : 0;
-    el.style.setProperty('--m', clamped.toFixed(3));
-    el.dataset.hot = String(Boolean(hot));
-  }
+  setTextCached('spd', kpiRefs.speed, Number.isFinite(spd) ? `${spd.toFixed(1)}` : '—');
+  setTextCached('spdSub', kpiRefs.speedSub, Number.isFinite(encL) && Number.isFinite(encR)
+    ? `左 ${Math.round(encL)} · 右 ${Math.round(encR)} cnt/2ms` : '左 — · 右 — cnt/2ms');
+  setMeterCached('speed', Number.isFinite(spd) ? Math.abs(spd) / 260 : 0, Math.abs(spd || 0) > 220);
 
-  $('[data-kpi-speed]').textContent = Number.isFinite(spd) ? `${spd.toFixed(1)}` : '—';
-  $('[data-kpi-speed-sub]').textContent = Number.isFinite(encL) && Number.isFinite(encR)
-    ? `左 ${Math.round(encL)} · 右 ${Math.round(encR)} cnt/2ms` : '左 — · 右 — cnt/2ms';
-  setMeter('speed', Number.isFinite(spd) ? Math.abs(spd) / 260 : 0, Math.abs(spd || 0) > 220);
+  setTextCached('gyro', kpiRefs.gyro, Number.isFinite(gyro) ? `${gyro >= 0 ? '+' : ''}${gyro.toFixed(1)} °/s` : '—');
+  setTextCached('gyroSub', kpiRefs.gyroSub, Number.isFinite(yawTgt) ? `目标 ${yawTgt >= 0 ? '+' : ''}${yawTgt.toFixed(0)} °/s` : '目标 — °/s');
+  setMeterCached('gyro', Number.isFinite(gyro) ? gyro / 600 : 0, Math.abs(gyro || 0) > 380);
 
-  $('[data-kpi-gyro]').textContent = Number.isFinite(gyro) ? `${gyro >= 0 ? '+' : ''}${gyro.toFixed(1)} °/s` : '—';
-  $('[data-kpi-gyro-sub]').textContent = Number.isFinite(yawTgt) ? `目标 ${yawTgt >= 0 ? '+' : ''}${yawTgt.toFixed(0)} °/s` : '目标 — °/s';
-  setMeter('gyro', Number.isFinite(gyro) ? gyro / 600 : 0, Math.abs(gyro || 0) > 380);
-
-  $('[data-kpi-pwm]').textContent = Number.isFinite(pwmCm) && Number.isFinite(pwmDm)
-    ? `${Math.round(pwmCm)} / ${Math.round(pwmDm)}` : '—';
-  $('[data-kpi-pwm-sub]').textContent = Number.isFinite(pwmL) && Number.isFinite(pwmR)
-    ? `左 ${Math.round(pwmL)} · 右 ${Math.round(pwmR)}` : '纵向 — · 转向 —';
+  setTextCached('pwm', kpiRefs.pwm, Number.isFinite(pwmCm) && Number.isFinite(pwmDm)
+    ? `${Math.round(pwmCm)} / ${Math.round(pwmDm)}` : '—');
+  setTextCached('pwmSub', kpiRefs.pwmSub, Number.isFinite(pwmL) && Number.isFinite(pwmR)
+    ? `左 ${Math.round(pwmL)} · 右 ${Math.round(pwmR)}` : '纵向 — · 转向 —');
   const maxPwmRatio = Math.max(Math.abs(pwmL || 0), Math.abs(pwmR || 0)) / PWM_LIMIT;
-  setMeter('pwm', Number.isFinite(maxPwmRatio) ? maxPwmRatio : 0, maxPwmRatio > 0.85);
+  setMeterCached('pwm', Number.isFinite(maxPwmRatio) ? maxPwmRatio : 0, maxPwmRatio > 0.85);
 
-  $('[data-kpi-vis]').textContent = Number.isFinite(errPx) ? `${errPx >= 0 ? '+' : ''}${errPx.toFixed(0)} px` : '—';
+  setTextCached('vis', kpiRefs.vis, Number.isFinite(errPx) ? `${errPx >= 0 ? '+' : ''}${errPx.toFixed(0)} px` : '—');
   const fps = frameTimes.length >= 2 ? ((frameTimes.length - 1) * 1000 / Math.max(1, frameTimes.at(-1) - frameTimes[0])).toFixed(1) : null;
-  $('[data-kpi-vis-sub]').textContent = `k = ${Number.isFinite(routeK) ? Math.round(routeK) : '—'} · ${fps ? `${fps} fps` : '等待图传'}`;
-  setMeter('vis', Number.isFinite(errPx) ? errPx / 70 : 0, Math.abs(errPx || 0) > 35);
+  setTextCached('visSub', kpiRefs.visSub, `k = ${Number.isFinite(routeK) ? Math.round(routeK) : '—'} · ${fps ? `${fps} fps` : '等待图传'}`);
+  setMeterCached('vis', Number.isFinite(errPx) ? errPx / 70 : 0, Math.abs(errPx || 0) > 35);
 
-  const batEl = $('[data-kpi-bat]');
+  const batEl = kpiRefs.bat;
+  let batTxt = '—', batLvl = 'idle', batM = 0, batHot = false;
   if (Number.isFinite(vbat) && vbat >= VBAT_USB) {
-    batEl.textContent = `${(vbat / 1000).toFixed(2)} V`;
-    batEl.dataset.level = vbat < 10500 ? 'bad' : vbat < VBAT_COMP_MIN ? 'warn' : 'good';
-    setMeter('bat', (vbat - 10500) / 2100, vbat < VBAT_COMP_MIN);
+    batTxt = `${(vbat / 1000).toFixed(2)} V`;
+    batLvl = vbat < 10500 ? 'bad' : vbat < VBAT_COMP_MIN ? 'warn' : 'good';
+    batM = (vbat - 10500) / 2100;
+    batHot = vbat < VBAT_COMP_MIN;
   } else if (Number.isFinite(vbat) && vbat > 0) {
-    batEl.textContent = 'USB';
-    batEl.dataset.level = 'warn';
-    setMeter('bat', 0.25, true);
-  } else {
-    batEl.textContent = '—';
-    batEl.dataset.level = 'idle';
-    setMeter('bat', 0, false);
+    batTxt = 'USB';
+    batLvl = 'warn';
+    batM = 0.25;
+    batHot = true;
   }
+  setTextCached('bat', batEl, batTxt);
+  if (kpiCache.batLvl !== batLvl) { kpiCache.batLvl = batLvl; batEl.dataset.level = batLvl; }
+  setMeterCached('bat', batM, batHot);
 
   tunePro.updateTelemetry({ spd, encL, encR, gyro, yawTgt, errPx, pwmCm, pwmDm, pwmL, pwmR });
 }
@@ -568,46 +657,52 @@ $('[data-open]').addEventListener('change', async e => {
   addLog('event', `已打开离线文件 ${f.name}（${store.size} 点）`);
   dirty = true;
 });
-$('[data-log-clear]').addEventListener('click', () => { logs.length = 0; renderLogs(); });
+$('[data-log-clear]').addEventListener('click', () => { logs.length = 0; logsDirty = true; renderLogs(); });
 $('[data-log-copy]').addEventListener('click', () => navigator.clipboard?.writeText(logs.map(l => l.line).join('\n')));
 $('[data-log-status]').addEventListener('change', renderLogs);
+logCard?.addEventListener('toggle', () => { if (logCard.open) renderLogs(); });
 
 const chartCanvas = $('[data-main-chart]');
+let chartRect = null;
+chartCanvas.addEventListener('pointerenter', () => { chartRect = chartCanvas.getBoundingClientRect(); }, { passive: true });
 chartCanvas.addEventListener('pointermove', e => {
-  const r = chartCanvas.getBoundingClientRect(), [t0, t1] = getWindow();
+  const r = chartRect || chartCanvas.getBoundingClientRect(), [t0, t1] = getWindow();
   hoverT = t0 + (e.clientX - r.left - 58) / Math.max(1, r.width - 106) * (t1 - t0);
   dirty = true;
-});
-chartCanvas.addEventListener('pointerleave', () => { hoverT = null; dirty = true; });
+}, { passive: true });
+chartCanvas.addEventListener('pointerleave', () => { chartRect = null; hoverT = null; dirty = true; });
 
 function download(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// ---------- 30 fps 刷新循环 ----------
-let lastVer = -1, lastDraw = 0, lastDiag = 0;
+// ---------- 30 fps 刷新循环（后台隐藏零绘制 + 差分更新零抖动） ----------
+let lastVer = -1, lastDraw = 0, lastDiag = 0, lastDiagHTML = '';
 function tick(now) {
   requestAnimationFrame(tick);
+  if (document.hidden) return;
   if ((dirty || (following && store.version !== lastVer)) && now - lastDraw > 32) {
     lastDraw = now; lastVer = store.version; dirty = false;
     const [t0, t1] = getWindow();
     const { readout } = mainChart.draw({ t0, t1, hoverT });
-    const box = $('[data-readout]');
-    box.hidden = !readout.length || hoverT === null;
-    if (!box.hidden) box.innerHTML = readout.map(r => `<span style="--c:var(${r.color})">${esc(r.label)} <b>${Math.abs(r.v) >= 100 ? r.v.toFixed(0) : r.v.toFixed(2)}</b></span>`).join('');
+    const hideBox = !readout.length || hoverT === null;
+    if (readoutEl.hidden !== hideBox) readoutEl.hidden = hideBox;
+    if (!hideBox) readoutEl.innerHTML = readout.map(r => `<span style="--c:var(${r.color})">${esc(r.label)} <b>${Math.abs(r.v) >= 100 ? r.v.toFixed(0) : r.v.toFixed(2)}</b></span>`).join('');
   }
   if (now - lastDiag > 220) {
     lastDiag = now;
     const [t0, t1] = getWindow();
     const chips = VIEWS[currentView].diag(store, t0, t1);
-    $('[data-diag]').innerHTML = chips.map(([k, v, lv]) => `<span${lv ? ` data-level="${lv}"` : ''}><small>${esc(k)}</small>${esc(v)}</span>`).join('');
+    const diagHTML = chips.map(([k, v, lv]) => `<span${lv ? ` data-level="${lv}"` : ''}><small>${esc(k)}</small>${esc(v)}</span>`).join('');
+    if (diagHTML !== lastDiagHTML) { lastDiagHTML = diagHTML; diagEl.innerHTML = diagHTML; }
     while (byteLog.length && now - byteLog[0][0] > 1000) byteLog.shift();
     const kbs = byteLog.reduce((a, [, n]) => a + n, 0) / 1024;
-    $('[data-rate]').textContent = ingest.ctx.source ? `${ingest.ctx.source} · ${ingest.ctx.rate.toFixed(ingest.ctx.rate < 10 ? 1 : 0)} Hz` : '无数据';
-    $('[data-link]').textContent = `${kbs.toFixed(1)} KB/s${badCnt ? ` · 坏包 ${badCnt}` : ''}`;
-    updateKPIStrip(kbs);
-    drawGuides();
+    setTextCached('rate', rateEl, ingest.ctx.source ? `${ingest.ctx.source} · ${ingest.ctx.rate.toFixed(ingest.ctx.rate < 10 ? 1 : 0)} Hz` : '无数据');
+    setTextCached('link', linkEl, `${kbs.toFixed(1)} KB/s${badCnt ? ` · 坏包 ${badCnt}` : ''}`);
+    if (logsDirty) setTextCached('logCount', logCountEl, `${logs.length} 条`);
+    updateKPIStrip();
+    drawGuides(false);
   }
 }
 
@@ -617,5 +712,8 @@ applyTopologyChrome(currentTopo);
 setPlotView('speed');
 refreshPorts();
 mountOptics(document);
+mountFluidTabs($('.tp-topo-tabs'), { kind: 'pill' });
+mountFluidTabs($('.tp-line-tabs'), { kind: 'line' });
+mountFluidTabs($('.tp-inspector-tabs'), { selector: 'button[role="tab"]', kind: 'line' });
 try { new EventSource('/api/app/lifecycle'); } catch {}
 requestAnimationFrame(tick);

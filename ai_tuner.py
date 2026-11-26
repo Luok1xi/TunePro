@@ -251,11 +251,15 @@ def _find_cli_binary(tool: str) -> str | None:
         ],
         'agy': [
             'agy',
+            localapp / 'agy' / 'bin' / 'agy.exe',
+            localapp / 'agy' / 'bin' / 'agy',
+            home / '.local' / 'bin' / 'agy.exe',
+            home / '.local' / 'bin' / 'agy',
             appdata / 'npm' / 'agy.cmd',
             home / '.gemini' / 'antigravity-cli' / 'bin' / 'agy.exe',
             home / '.gemini' / 'antigravity-cli' / 'bin' / 'agy',
-            localapp / 'Programs' / 'antigravity' / 'bin' / 'agy.cmd',
-            home / '.local' / 'bin' / 'agy',
+            localapp / 'Programs' / 'Antigravity' / 'bin' / 'agy.exe',
+            localapp / 'Programs' / 'Antigravity' / 'bin' / 'agy.cmd',
         ],
         'gemini': [
             'gemini',
@@ -277,18 +281,18 @@ def _find_cli_binary(tool: str) -> str | None:
 def detect_local_clis() -> list[dict[str, Any]]:
     """Probe installed official local AI CLIs (uses the user's own official account quota)."""
     specs = [
-        ('claude', 'Claude Code', '本机已登录 Claude 官方额度'),
-        ('codex', 'Codex CLI', '本机已登录 OpenAI / Codex 官方额度'),
-        ('agy', 'Antigravity (agy)', '本机已登录 Google Antigravity 官方额度'),
-        ('gemini', 'Gemini CLI', '本机已登录 Google Gemini 官方额度'),
+        ('agy', 'Antigravity (agy)', '本机已登录 Google Antigravity 官方额度', '未检测到 agy CLI：在 PowerShell 运行 irm https://antigravity.google/cli/install.ps1 | iex 即可安装'),
+        ('claude', 'Claude Code', '本机已登录 Claude 官方额度', '未检测到 Claude Code CLI'),
+        ('codex', 'Codex CLI', '本机已登录 OpenAI / Codex 官方额度', '未检测到 Codex CLI'),
+        ('gemini', 'Gemini CLI', '本机已登录 Google Gemini 官方额度', '未检测到 Gemini CLI'),
     ]
     out: list[dict[str, Any]] = []
-    for tool_id, label, desc in specs:
+    for tool_id, label, desc, install_hint in specs:
         path = _find_cli_binary(tool_id)
         out.append({
             'id': tool_id,
             'label': label,
-            'desc': desc,
+            'desc': desc if path else install_hint,
             'available': bool(path),
             'path': path or '',
         })
@@ -311,7 +315,7 @@ def call_local_cli_text(
 
     wanted = str(cli_tool or 'auto').strip().lower()
     if wanted in ('', 'auto'):
-        chosen_id = next((t for t in ('claude', 'codex', 'agy', 'gemini') if t in avail), '')
+        chosen_id = next((t for t in ('agy', 'claude', 'codex', 'gemini') if t in avail), '')
     elif wanted in avail:
         chosen_id = wanted
     else:
@@ -392,12 +396,22 @@ def call_local_cli_text(
                     pass
 
     if chosen_id == 'agy':
-        cmd = [exe, '-p', full_prompt]
+        effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}
+        cmd = [
+            exe,
+            '-p', full_prompt,
+            '--output-format', 'text',
+            '--disable-slash-commands',
+            '--effort', effort_map[eff_key],
+            '--print-timeout', f'{max(15, int(timeout_s))}s',
+        ]
         if model:
             cmd.extend(['--model', model])
         proc = _run_cmd(cmd, '')
         if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or '').strip()[:180]
+            err = (proc.stderr or proc.stdout or '').strip()[:220]
+            if 'auth' in err.lower() or 'login' in err.lower():
+                raise RuntimeError('Antigravity (agy) 尚未完成 CLI 授权：请先在终端运行一次 agy 完成账号登录后再试。')
             raise RuntimeError(f'Antigravity CLI 返回错误 ({proc.returncode})：{err}')
         return (proc.stdout or '').strip(), f'Antigravity ({model or "官方默认"})'
 

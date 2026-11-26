@@ -30,9 +30,9 @@ const MODEL_PRESETS = [
 ];
 
 const LOCAL_CLI_DEFAULTS = [
+  { id: 'agy',    label: 'Antigravity', available: false, desc: '本机已登录 Google Antigravity 官方额度' },
   { id: 'claude', label: 'Claude Code', available: false, desc: '本机已登录 Claude 官方额度' },
   { id: 'codex',  label: 'Codex CLI',   available: false, desc: '本机已登录 OpenAI / Codex 官方额度' },
-  { id: 'agy',    label: 'Antigravity', available: false, desc: '本机已登录 Google Antigravity 官方额度' },
   { id: 'gemini', label: 'Gemini CLI',  available: false, desc: '本机已登录 Google Gemini 官方额度' },
 ];
 

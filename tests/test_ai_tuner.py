@@ -287,7 +287,7 @@ class TestAITunerGuardrails(unittest.TestCase):
 
     def test_detect_local_clis_and_fallback_error(self):
         clis = ai_tuner.detect_local_clis()
-        self.assertEqual([c['id'] for c in clis], ['claude', 'codex', 'agy', 'gemini'])
+        self.assertEqual([c['id'] for c in clis], ['agy', 'claude', 'codex', 'gemini'])
         for item in clis:
             self.assertIn('label', item)
             self.assertIn('available', item)

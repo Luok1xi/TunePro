@@ -108,7 +108,7 @@ function enhanceGlassSurface(el) {
   });
 }
 
-/* ---------- 3. 弹簧滑动指示底板 / 下划线 (只动 transform) ---------- */
+/* ---------- 3. 弹簧滑动指示底板 / 下划线（真实宽度 + GPU 平移，零圆角/描边畸变） ---------- */
 export function mountFluidTabs(container, { selector = 'button', activeSelector = '[aria-selected="true"], [aria-pressed="true"]', kind = 'line' } = {}) {
   if (!container || enhancedTabs.has(container)) return { sync() {} };
   enhancedTabs.add(container);
@@ -129,13 +129,15 @@ export function mountFluidTabs(container, { selector = 'button', activeSelector 
     const w = active.offsetWidth;
     if (instant || !ready || motionOff()) {
       ind.style.transition = 'none';
-      ind.style.transform = `translate3d(${x}px, 0, 0) scaleX(${w})`;
+      ind.style.width = `${w}px`;
+      ind.style.transform = `translate3d(${x}px, 0, 0)`;
       ind.style.opacity = '1';
       ind.getBoundingClientRect();
       ind.style.transition = '';
       ready = true;
     } else {
-      ind.style.transform = `translate3d(${x}px, 0, 0) scaleX(${w})`;
+      ind.style.width = `${w}px`;
+      ind.style.transform = `translate3d(${x}px, 0, 0)`;
       ind.style.opacity = '1';
     }
   };
@@ -144,6 +146,7 @@ export function mountFluidTabs(container, { selector = 'button', activeSelector 
   ro?.observe(container);
   const mo = new MutationObserver(() => sync(false));
   mo.observe(container, { subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-pressed'] });
+  document.fonts?.ready?.then(() => sync(true));
   requestAnimationFrame(() => sync(true));
   return { sync };
 }

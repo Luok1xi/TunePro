@@ -2,7 +2,7 @@
 name: tc264-pid-tuner
 description: Evidence-based PID auto-tuning and telemetry diagnosis for TC264 smart cars (Two-Series-One-Parallel 2S1P and Classic 3-Cascade) connected to TunePro or MOCK0. Use for step-response analysis, bounded gain updates, multi-loop tuning order, overshoot/oscillation diagnosis, and rollback-safe closed-loop experiments.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # TC264 PID Tuner Skill

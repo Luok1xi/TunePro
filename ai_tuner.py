@@ -75,6 +75,7 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'topology': '2s1p',
         'topo_val': 1,
         'kind': 'speed',
+        'controller_form': 'positional_ff_pi',
         'mode': 6,          # multi-step stair: 0 -> low -> high -> low -> 0
         'wheel': 2,         # both wheels
         'step_mode': 1,
@@ -83,6 +84,10 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'target_bounds': [60, 280],
         'unit': 'cnt/2ms',
         'equations': 'PWM_speed = 6.0*v_des + vkp*(v_des - v_avg) + sum(vki*(v_des - v_avg)), v_avg = 0.5*(encL + encR), 500 Hz',
+        'tuning_semantics': (
+            '位置式前馈+PI：vkp 主导比例加速与动态跟踪，偏小上升慢、偏大引发高频锯齿振；'
+            'vki 消除负载稳态静差，偏小尾部欠调、偏大引发低频慢超调与摆动；PWM 触顶 ±8500 时勿盲目加积分。'
+        ),
         'bounds': {
             'vkp': {'min': 4.0, 'max': 80.0, 'max_step': 8.0, 'max_ratio': 1.6, 'decimals': 2},
             'vki': {'min': 0.0, 'max': 6.0, 'max_step': 0.6, 'max_ratio': 1.8, 'decimals': 3},
@@ -101,6 +106,7 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'topology': '2s1p',
         'topo_val': 1,
         'kind': 'yaw',
+        'controller_form': 'positional_ff_pi_direct_pwm',
         'mode': 7,          # alternating yaw: 0 -> +w -> -w -> +w -> 0
         'wheel': 2,
         'step_mode': 2,
@@ -109,6 +115,10 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'target_bounds': [120, 550],
         'unit': '°/s',
         'equations': 'PWM_turn = yff*w_des + ykp*(w_des - gyro_z) + sum(yki*(w_des - gyro_z)), 500 Hz direct PWM',
+        'tuning_semantics': (
+            '直出 PWM 位置式前馈+PI：yff 提供零相位滞后的转向起手前馈，稳态不足优先调 yff；'
+            'ykp 决定响应快慢与抗扰刚度，过大触发高频原地抽振；yki 仅作不对称补偿，过大导致低频过冲（循迹通常很小或为 0）。'
+        ),
         'bounds': {
             'yff': {'min': 0.2, 'max': 5.0, 'max_step': 0.45, 'max_ratio': 1.5, 'decimals': 3},
             'ykp': {'min': 1.0, 'max': 36.0, 'max_step': 3.5, 'max_ratio': 1.6, 'decimals': 2},
@@ -132,6 +142,7 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'topology': '3cascade',
         'topo_val': 0,
         'kind': 'speed',
+        'controller_form': 'incremental_pi',
         'mode': 6,
         'wheel': 2,
         'step_mode': 1,
@@ -139,7 +150,13 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'default_low': 85,
         'target_bounds': [60, 260],
         'unit': 'cnt/2ms',
-        'equations': 'Incremental wheel PI: dPWM = kp*(e - e_prev) + ki*e, 500 Hz independent L/R',
+        'equations': 'Incremental wheel PI (Kd=0): dPWM = kp*(e[k] - e[k-1]) + ki*e[k], 500 Hz independent L/R',
+        'tuning_semantics': (
+            '增量式 PI（左右轮独立，Kd=0 避免二阶差分把编码器量化噪声放大 4 倍）：'
+            'kp 乘 Δe，阶跃瞬间给初段提速、接近目标时因 Δe<0 起刹车阻尼作用——kp 偏小则起步肉或在 ki 较大时压不住超调，'
+            'kp 偏大则初段尖峰触顶或高频锯齿抖动；ki 乘 e[k] 主导持续爬升与消静差——ki 偏小尾部慢爬，ki 偏大引起低频大超调与慢摆。'
+            '经验比例参考 kp/ki ≈ τ/Ts（500 Hz 下 Ts=2 ms），左右轮需按各自实测指标独立整定。'
+        ),
         'bounds': {
             'lkp': {'min': 2.0, 'max': 50.0, 'max_step': 4.5, 'max_ratio': 1.6, 'decimals': 2},
             'lki': {'min': 0.05, 'max': 6.0, 'max_step': 0.5, 'max_ratio': 1.8, 'decimals': 3},
@@ -160,6 +177,7 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'topology': '3cascade',
         'topo_val': 0,
         'kind': 'yaw',
+        'controller_form': 'incremental_pi_cascade',
         'mode': 7,
         'wheel': 2,
         'step_mode': 2,
@@ -167,7 +185,12 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'default_low': 0,
         'target_bounds': [100, 450],
         'unit': '°/s',
-        'equations': 'Incremental yaw PI -> wheel diff target: dDiff = ykp*(e - e_prev) + yki*e, 500 Hz',
+        'equations': 'Incremental yaw PI (Kd=0) -> wheel diff target: dDiff = ykp*(e[k] - e[k-1]) + yki*e[k], 500 Hz',
+        'tuning_semantics': (
+            '增量式 PI 串级中环（输出为左右轮速差 cnt/2ms 而非直出 PWM，Kd=0）：'
+            'ykp 管初始转向爆发与接近目标时的刹车阻尼，yki 管持续转向推力与稳态跟踪；'
+            '严重偏慢时需同步评估 ykp 与 yki（单拉 ykp 会导致 kp/ki 失衡、跳一下后慢爬）；高频快振优先降 ykp，低频慢超调优先降 yki。'
+        ),
         'bounds': {
             'ykp': {'min': 0.02, 'max': 1.5, 'max_step': 0.14, 'max_ratio': 1.6, 'decimals': 4},
             'yki': {'min': 0.0, 'max': 0.15, 'max_step': 0.015, 'max_ratio': 1.8, 'decimals': 4},
@@ -186,6 +209,7 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'topology': 'both',
         'topo_val': None,
         'kind': 'outer',
+        'controller_form': 'positional_pd',
         'mode': 0,
         'wheel': 2,
         'step_mode': 3,
@@ -194,6 +218,10 @@ LOOP_PROFILES: dict[str, dict[str, Any]] = {
         'target_bounds': [60, 220],
         'unit': 'px',
         'equations': 'w_des = clip(dirp_cur * err_px + dird_cur * d_err_px, -yaw_cap, yaw_cap)',
+        'tuning_semantics': (
+            '位置式 PD 外环：dirp_cur 偏小入弯迟钝/偏离大，偏大来回甩尾；'
+            'dird_cur 偏小无法抑制过弯过冲摆动，偏大会放大像素量化噪声导致高频抖舵。'
+        ),
         'bounds': {
             'dirp_cur': {'min': 1.0, 'max': 40.0, 'max_step': 2.5, 'max_ratio': 1.5, 'decimals': 2},
             'dird_cur': {'min': 0.0, 'max': 40.0, 'max_step': 3.0, 'max_ratio': 1.6, 'decimals': 2},
@@ -346,6 +374,7 @@ class _WarmCLIWorker:
         self._ready_ev = threading.Event()
         self._turn_lock = threading.Lock()
         self.turns = 0
+        self.last_system_prompt = ''
         self.last_used = time.monotonic()
         self.closed = False
         self._start()
@@ -587,11 +616,11 @@ class _WarmCLIWorker:
 
 
 class LocalCLISessionPool:
-    """Maintains a single pre-warmed persistent CLI worker to eliminate cold-start lag."""
+    """Maintains pre-warmed persistent CLI workers isolated by role ('chat' vs 'tune')."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._worker: _WarmCLIWorker | None = None
+        self._workers: dict[str, _WarmCLIWorker] = {}
 
     def _resolve_target(self, cli_tool: str, model: str, reasoning_effort: str) -> tuple[str, str, str, bool, str]:
         eff_key = normalize_effort(reasoning_effort)
@@ -610,26 +639,25 @@ class LocalCLISessionPool:
         resolved_m = resolve_local_cli_model(chosen_id, explicit_m, eff_key)
         return chosen_id, avail[chosen_id]['path'], resolved_m, bool(explicit_m), eff_key
 
-    def _get_or_spawn(self, tool_id: str, exe: str, model: str, explicit_model: bool, effort_key: str) -> _WarmCLIWorker:
+    def _get_or_spawn(self, tool_id: str, exe: str, model: str, explicit_model: bool, effort_key: str, role: str = 'chat') -> _WarmCLIWorker:
+        slot = 'tune' if role == 'tune' else 'chat'
         want_key = (tool_id, exe, model, effort_key if (tool_id == 'claude' or explicit_model) else '')
         with self._lock:
-            if self._worker is not None and self._worker.key == want_key and self._worker.is_alive():
-                return self._worker
-            old = self._worker
-            self._worker = None
+            existing = self._workers.get(slot)
+            if existing is not None and existing.key == want_key and existing.is_alive():
+                return existing
+            old = self._workers.pop(slot, None)
         if old is not None:
             old.close()
         worker = _WarmCLIWorker(tool_id, exe, model, explicit_model, effort_key)
         with self._lock:
-            if self._worker is not None and self._worker is not worker:
-                old2 = self._worker
-                self._worker = worker
-                threading.Thread(target=old2.close, daemon=True).start()
-            else:
-                self._worker = worker
+            prev = self._workers.get(slot)
+            self._workers[slot] = worker
+            if prev is not None and prev is not worker:
+                threading.Thread(target=prev.close, daemon=True).start()
         return worker
 
-    def warmup(self, cli_tool: str = 'auto', model: str = '', reasoning_effort: str = 'medium') -> dict[str, Any]:
+    def warmup(self, cli_tool: str = 'auto', model: str = '', reasoning_effort: str = 'medium', role: str = 'chat') -> dict[str, Any]:
         try:
             tool_id, exe, resolved_m, explicit_m, eff_key = self._resolve_target(cli_tool, model, reasoning_effort)
         except Exception as exc:
@@ -639,12 +667,12 @@ class LocalCLISessionPool:
 
         def _bg() -> None:
             try:
-                w = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key)
+                w = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key, role=role)
                 w.wait_ready(18.0)
             except Exception:
                 pass
 
-        threading.Thread(target=_bg, name='cli-warmup', daemon=True).start()
+        threading.Thread(target=_bg, name=f'cli-warmup-{role}', daemon=True).start()
         return {'ok': True, 'warming': True, 'tool': tool_id, 'model': resolved_m or '官方默认'}
 
     def ask_stream(
@@ -657,25 +685,29 @@ class LocalCLISessionPool:
         user_prompt: str,
         on_delta: Callable[[str], None] | None = None,
         timeout_s: float = 75.0,
+        role: str = 'chat',
     ) -> tuple[str, str]:
         tool_id, exe, resolved_m, explicit_m, eff_key = self._resolve_target(cli_tool, model, reasoning_effort)
         label_map = {'agy': 'Antigravity', 'claude': 'Claude Code', 'codex': 'Codex', 'gemini': 'Gemini CLI'}
         display_model = f'{label_map.get(tool_id, tool_id)} ({resolved_m or "官方默认"})'
 
         if tool_id in ('agy', 'claude'):
-            worker = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key)
-            # Only attach full system_prompt on first turn of a warm worker (reuses KV cache on turn 2+!)
-            prompt = f'{system_prompt}\n\n{user_prompt}' if worker.turns == 0 else user_prompt
+            worker = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key, role=role)
+            # Re-send system_prompt whenever worker is fresh OR loop/system rules changed; otherwise reuse warm KV cache!
+            need_sys = (worker.turns == 0) or (worker.last_system_prompt != system_prompt)
+            prompt = f'{system_prompt}\n\n{user_prompt}' if need_sys else user_prompt
             try:
                 text = worker.ask(prompt, on_delta=on_delta, timeout_s=timeout_s)
+                worker.last_system_prompt = system_prompt
                 return text, display_model
             except RuntimeError as first_err:
                 if '登录' in str(first_err) or '授权' in str(first_err):
                     raise
                 # Single clean respawn retry if cached worker died between turns
                 if not worker.is_alive():
-                    worker = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key)
+                    worker = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key, role=role)
                     text = worker.ask(f'{system_prompt}\n\n{user_prompt}', on_delta=on_delta, timeout_s=timeout_s)
+                    worker.last_system_prompt = system_prompt
                     return text, display_model
                 raise
 
@@ -729,9 +761,9 @@ class LocalCLISessionPool:
 
     def close_all(self) -> None:
         with self._lock:
-            w = self._worker
-            self._worker = None
-        if w is not None:
+            workers = list(self._workers.values())
+            self._workers.clear()
+        for w in workers:
             w.close()
 
 
@@ -748,6 +780,7 @@ def call_local_cli_text(
     user_prompt: str,
     on_delta: Callable[[str], None] | None = None,
     timeout_s: float = 75.0,
+    role: str = 'chat',
 ) -> tuple[str, str]:
     """Invoke a locally installed, officially authenticated AI CLI via warm persistent session pool."""
     return LOCAL_CLI_POOL.ask_stream(
@@ -758,6 +791,7 @@ def call_local_cli_text(
         user_prompt=user_prompt,
         on_delta=on_delta,
         timeout_s=timeout_s,
+        role=role,
     )
 
 
@@ -824,11 +858,14 @@ def check_and_clamp_proposal(
             notes.append(f'{key} 超界，已限幅至 {val:.{decimals}f} (允许 [{lo}, {hi}])')
 
         delta = val - cur
-        if abs(delta) > max_step + 1e-9:
+        # Asymmetric safety cap: increasing gains is strictly capped by max_step;
+        # when strict=False (in-app auto-tune), backing down an over-tuned gain allows up to 45% cut.
+        eff_max_step = max_step if (strict or delta >= 0) else max(max_step, abs(cur) * 0.45)
+        if abs(delta) > eff_max_step + 1e-9:
             if strict:
                 raise ValueError(f'{key} 单轮变化 {delta:+.4f} 超过最大步长 ±{max_step}')
-            val = cur + math.copysign(max_step, delta)
-            notes.append(f'{key} 单轮步长过大，已限步至 {val:.{decimals}f} (±{max_step})')
+            val = cur + math.copysign(eff_max_step, delta)
+            notes.append(f'{key} 单轮步长过大，已限步至 {val:.{decimals}f} (±{eff_max_step:.3g})')
 
         if max_ratio > 1.0 and cur > 1e-6 and val > cur * max_ratio + 1e-9:
             if strict:
@@ -929,18 +966,20 @@ def parse_gp1_line(body: str) -> dict[str, Any] | None:
     }
 
 
-def analyze_capture_rows(
+_STATUS_RANK: dict[str, int] = {
+    'STABLE': 0,
+    'SLOW_RESPONSE': 1,
+    'OVERSHOOTING': 2,
+    'SATURATED': 3,
+    'OSCILLATING': 4,
+}
+
+
+def _detect_capture_segment(
     header: dict[str, Any],
     rows: list[dict[str, float]],
     loop_id: str,
-) -> dict[str, Any]:
-    """Compute step-response metrics from onboard [tune2] 4 ms capture rows.
-
-    For multi-step profiles (step-stair / yaw-alt), automatically skips the 1st
-    edge (static friction deadzone) and evaluates the 2nd clean dynamic edge.
-    """
-    if len(rows) < 8:
-        raise ValueError(f'抓拍点数不足（仅 {len(rows)} 点），无法评估响应')
+) -> tuple[int, int, str, list[float], list[float], list[float], list[float], list[float], list[float], float]:
     dt_ms = float(header.get('dt_ms', 4.0) or 4.0)
     profile = LOOP_PROFILES[loop_id]
     kind = profile['kind']
@@ -957,7 +996,6 @@ def analyze_capture_rows(
         else:
             measured = [0.5 * (float(r['enc_l']) + float(r['enc_r'])) for r in rows]
     else:
-        # Outer loop uses gyro tracking against target yaw, plus image error if available
         measured = [float(r['gyro']) for r in rows]
 
     pwm_l = [float(r['pwm_l']) for r in rows]
@@ -965,13 +1003,11 @@ def analyze_capture_rows(
     pwm_cm = [0.5 * (a + b) for a, b in zip(pwm_l, pwm_r)]
     pwm_dm = [0.5 * (b - a) for a, b in zip(pwm_l, pwm_r)]
 
-    # Detect step transitions in target
     edges: list[int] = []
     for i in range(1, len(targets)):
         if abs(targets[i] - targets[i - 1]) >= max(5.0, abs(targets[i]) * 0.15):
             edges.append(i)
 
-    # Prefer the 2nd dynamic transition on multi-step (stair or yaw-alt) to skip static friction
     cap_profile = str(header.get('profile', '') or '')
     if len(edges) >= 2 and cap_profile in ('step-stair', 'yaw-alt'):
         seg_start = edges[1]
@@ -986,21 +1022,165 @@ def analyze_capture_rows(
         seg_end = len(rows)
         edge_used = 'full_window'
 
-    # Keep at least 12 samples in the evaluated segment
     if seg_end - seg_start < 12:
         seg_start = 0
         seg_end = len(rows)
         edge_used = 'full_window'
 
-    seg_t = [(i - seg_start) * dt_ms for i in range(seg_start, seg_end)]
-    seg_tgt = targets[seg_start:seg_end]
-    seg_y = measured[seg_start:seg_end]
-    seg_pl = pwm_l[seg_start:seg_end]
-    seg_pr = pwm_r[seg_start:seg_end]
-    seg_cm = pwm_cm[seg_start:seg_end]
-    seg_dm = pwm_dm[seg_start:seg_end]
+    return seg_start, seg_end, edge_used, targets, measured, pwm_l, pwm_r, pwm_cm, pwm_dm, dt_ms
 
-    y0 = measured[max(0, seg_start - 1)]
+
+def sample_capture_waveform(
+    header: dict[str, Any],
+    rows: list[dict[str, float]],
+    loop_id: str,
+    limit: int = 20,
+) -> str:
+    """Extrema-preserving 4 ms waveform compression (adapted from llm-pid-tuner buffer.py).
+
+    Always retains pre-step anchor, exact step edge, tail end, global min/max spikes of
+    actual/error/PWM, and per-bucket output extrema so LLMs see real curve shape instead
+    of only summary scalars.
+    """
+    if len(rows) < 4:
+        return ''
+    seg_start, seg_end, edge_used, targets, measured, _pl, _pr, pwm_cm, pwm_dm, dt_ms = _detect_capture_segment(
+        header, rows, loop_id
+    )
+    pre = max(0, seg_start - 2)
+    win_len = seg_end - pre
+    if win_len <= 0:
+        return ''
+
+    def row_at(rel_i: int) -> tuple[float, float, float, float, float, float]:
+        gi = pre + rel_i
+        t_ms = (gi - seg_start) * dt_ms
+        tgt = targets[gi]
+        act = measured[gi]
+        err = tgt - act
+        return t_ms, tgt, act, err, pwm_cm[gi], pwm_dm[gi]
+
+    if win_len <= limit:
+        picked = list(range(win_len))
+    else:
+        selected: set[int] = {0, min(win_len - 1, seg_start - pre), win_len - 1}
+        # Preserve step transitions inside window
+        for i in range(1, win_len):
+            if abs(targets[pre + i] - targets[pre + i - 1]) >= 5.0:
+                selected.update((i - 1, i))
+        # Preserve global extrema of actual, error, pwm_cm, pwm_dm
+        acts = [measured[pre + i] for i in range(win_len)]
+        errs = [targets[pre + i] - measured[pre + i] for i in range(win_len)]
+        cms = [pwm_cm[pre + i] for i in range(win_len)]
+        dms = [pwm_dm[pre + i] for i in range(win_len)]
+        for series in (acts, errs, cms, dms):
+            selected.add(min(range(win_len), key=lambda i: series[i]))
+            selected.add(max(range(win_len), key=lambda i: series[i]))
+        # Per-bucket min/max of actual preserves oscillation peaks and troughs
+        buckets = max(1, (limit - len(selected)) // 2)
+        for b in range(buckets):
+            b0 = b * win_len // buckets
+            b1 = max(b0 + 1, (b + 1) * win_len // buckets)
+            idxs = range(b0, b1)
+            selected.add(min(idxs, key=lambda i: acts[i]))
+            selected.add(max(idxs, key=lambda i: acts[i]))
+        for j in range(limit):
+            if len(selected) >= limit:
+                break
+            selected.add(j * (win_len - 1) // max(1, limit - 1))
+        picked = sorted(selected)
+
+    lines = [f'# edge={edge_used} pts={len(picked)}/{seg_end - seg_start} dt_ms={dt_ms:g}', 't_ms,tgt,act,err,pwm_cm,pwm_dm']
+    for rel_i in picked:
+        t_ms, tgt, act, err, cm, dm = row_at(rel_i)
+        lines.append(f'{t_ms:.0f},{tgt:.1f},{act:.1f},{err:.1f},{cm:.0f},{dm:.0f}')
+    return '\n'.join(lines)
+
+
+def identify_step_dynamics(
+    seg_t: list[float],
+    seg_y: list[float],
+    seg_tgt: list[float],
+    seg_drive: list[float],
+    y0: float,
+    target_val: float,
+    dt_ms: float,
+    *,
+    max_ov: float,
+    crossings: int,
+    tail_p2p_pct: float,
+    overshoot_pct: float,
+    cross_times: list[float],
+    drive0: float,
+    kind: str,
+) -> dict[str, Any]:
+    """Identify FOPDT/underdamped step dynamics directly from the 4 ms dynamic edge."""
+    amp = abs(target_val - y0)
+    direction = 1.0 if target_val >= y0 else -1.0
+    dead_time_ms: float | None = None
+    tau_eff_ms: float | None = None
+    peak_ms: float | None = None
+
+    if amp > 1e-3 and seg_y:
+        progress = [direction * (y - y0) / amp for y in seg_y]
+        t05 = next((t for t, p in zip(seg_t, progress) if p >= 0.05), None)
+        t63 = next((t for t, p in zip(seg_t, progress) if p >= 0.632), None)
+        if t05 is not None:
+            dead_time_ms = round(t05, 1)
+        if t63 is not None:
+            tau_eff_ms = round(max(dt_ms, t63 - (t05 or 0.0)), 1)
+        peak_idx = max(range(len(seg_y)), key=lambda i: direction * (seg_y[i] - y0))
+        peak_ms = round(seg_t[peak_idx], 1)
+
+    osc_period_ms: float | None = None
+    if len(cross_times) >= 2:
+        half_periods = [b - a for a, b in zip(cross_times, cross_times[1:]) if b > a]
+        if half_periods:
+            half_periods.sort()
+            med_half = half_periods[len(half_periods) // 2]
+            osc_period_ms = round(med_half * 2.0, 1)
+
+    if (crossings >= 5 and osc_period_ms is not None and osc_period_ms <= 44.0) or (crossings >= 10 and tail_p2p_pct > 18.0 and (osc_period_ms is None or osc_period_ms <= 52.0)):
+        osc_type = 'high_freq_p_chatter'
+    elif overshoot_pct > max_ov and (crossings <= 4 or (osc_period_ms is not None and osc_period_ms > 52.0)):
+        osc_type = 'low_freq_i_swing'
+    elif crossings >= 5:
+        osc_type = 'oscillating'
+    else:
+        osc_type = 'none'
+
+    tail_idx = max(1, int(len(seg_y) * 0.65))
+    tail_y_mean = sum(seg_y[tail_idx:]) / len(seg_y[tail_idx:])
+    tail_u_mean = sum(seg_drive[tail_idx:]) / len(seg_drive[tail_idx:])
+    du = tail_u_mean - drive0
+    dy = tail_y_mean - y0
+    eff_dc_gain = round(abs(dy / du), 4) if abs(du) > 80.0 else None
+    implied_ff_hint = round(abs(tail_u_mean / tail_y_mean), 3) if (kind == 'yaw' and abs(tail_y_mean) > 40.0 and abs(tail_u_mean) > 80.0) else None
+
+    return {
+        'dead_time_ms': dead_time_ms,
+        'tau_eff_ms': tau_eff_ms,
+        'peak_ms': peak_ms,
+        'osc_period_ms': osc_period_ms,
+        'osc_type': osc_type,
+        'eff_dc_gain': eff_dc_gain,
+        'implied_ff_hint': implied_ff_hint,
+    }
+
+
+def _compute_channel_metrics(
+    seg_t: list[float],
+    seg_tgt: list[float],
+    seg_y: list[float],
+    seg_pl: list[float],
+    seg_pr: list[float],
+    seg_drive: list[float],
+    y0: float,
+    drive0: float,
+    dt_ms: float,
+    acc: dict[str, Any],
+    kind: str,
+) -> dict[str, Any]:
     target_val = seg_tgt[min(2, len(seg_tgt) - 1)]
     amp = abs(target_val - y0)
     direction = 1.0 if target_val >= y0 else -1.0
@@ -1010,7 +1190,6 @@ def analyze_capture_rows(
     mae = sum(abs_err) / len(abs_err)
     rms_err = math.sqrt(sum(e * e for e in errors) / len(errors))
 
-    # Tail window = final 35% of the step plateau
     tail_idx = max(1, int(len(seg_y) * 0.65))
     tail_err = errors[tail_idx:]
     tail_y = seg_y[tail_idx:]
@@ -1037,12 +1216,13 @@ def analyze_capture_rows(
         if last_out + 1 < len(seg_t) - 1:
             settling_ms = seg_t[last_out + 1]
 
-    # Count target crossings after reaching 50% progress (oscillation detector)
     hyst = max(2.0 if kind == 'speed' else 8.0, amp * 0.025)
     crossings = 0
+    cross_times: list[float] = []
     last_sign = 0
     start_cross = max(1, int(len(seg_y) * 0.15))
-    for e in errors[start_cross:]:
+    for i in range(start_cross, len(errors)):
+        e = errors[i]
         if e > hyst:
             s = 1
         elif e < -hyst:
@@ -1051,20 +1231,20 @@ def analyze_capture_rows(
             continue
         if last_sign != 0 and s != last_sign:
             crossings += 1
+            cross_times.append(seg_t[i])
         last_sign = s
 
     sat_count = sum(1 for a, b in zip(seg_pl, seg_pr) if abs(a) >= PWM_LIMIT * 0.98 or abs(b) >= PWM_LIMIT * 0.98)
     pwm_sat_pct = sat_count / len(seg_pl) * 100.0
-    pwm_cm_peak = max(abs(x) for x in seg_cm)
-    pwm_dm_peak = max(abs(x) for x in seg_dm)
 
     ref_scale = max(1.0, abs(target_val), amp)
     steady_err_pct = abs(steady_err) / ref_scale * 100.0
     tail_mae_pct = tail_mae / ref_scale * 100.0
     tail_p2p_pct = tail_p2p / ref_scale * 100.0
 
-    # Stability classification
-    acc = profile['acceptance']
+    # Signed under-tracking (+ means actual fell short of target magnitude, - means exceeded)
+    signed_shortfall = direction * steady_err
+
     if crossings >= 6 or tail_p2p_pct > 18.0:
         status = 'OSCILLATING'
     elif overshoot_pct > max(acc['max_overshoot_pct'] * 1.4, 15.0):
@@ -1076,12 +1256,18 @@ def analyze_capture_rows(
     else:
         status = 'STABLE'
 
+    dynamics = identify_step_dynamics(
+        seg_t, seg_y, seg_tgt, seg_drive, y0, target_val, dt_ms,
+        max_ov=float(acc['max_overshoot_pct']),
+        crossings=crossings,
+        tail_p2p_pct=tail_p2p_pct,
+        overshoot_pct=overshoot_pct,
+        cross_times=cross_times,
+        drive0=drive0,
+        kind=kind,
+    )
+
     return {
-        'loop': loop_id,
-        'edge_used': edge_used,
-        'sample_count': len(seg_y),
-        'dt_ms': dt_ms,
-        'duration_ms': round(seg_t[-1], 1),
         'y0': round(y0, 2),
         'target': round(target_val, 2),
         'amplitude': round(amp, 2),
@@ -1089,6 +1275,7 @@ def analyze_capture_rows(
         'settling_ms': round(settling_ms, 1),
         'overshoot_pct': round(overshoot_pct, 2),
         'steady_err': round(steady_err, 2),
+        'signed_shortfall': round(signed_shortfall, 2),
         'steady_err_pct': round(steady_err_pct, 2),
         'mae': round(mae, 2),
         'rms_err': round(rms_err, 2),
@@ -1097,10 +1284,81 @@ def analyze_capture_rows(
         'tail_p2p': round(tail_p2p, 2),
         'crossings': int(crossings),
         'pwm_sat_pct': round(pwm_sat_pct, 1),
+        'status': status,
+        'dynamics': dynamics,
+    }
+
+
+def analyze_capture_rows(
+    header: dict[str, Any],
+    rows: list[dict[str, float]],
+    loop_id: str,
+) -> dict[str, Any]:
+    """Compute step-response metrics & identified dynamics from onboard [tune2] 4 ms capture rows.
+
+    For multi-step profiles (step-stair / yaw-alt), automatically skips the 1st
+    edge (static friction deadzone) and evaluates the 2nd clean dynamic edge.
+    For classic 3-cascade dual-wheel speed (`speed_3c`), also computes independent
+    left/right wheel sub-metrics so L/R gains can be tuned separately.
+    """
+    if len(rows) < 8:
+        raise ValueError(f'抓拍点数不足（仅 {len(rows)} 点），无法评估响应')
+
+    seg_start, seg_end, edge_used, targets, measured, pwm_l, pwm_r, pwm_cm, pwm_dm, dt_ms = _detect_capture_segment(
+        header, rows, loop_id
+    )
+    profile = LOOP_PROFILES[loop_id]
+    kind = profile['kind']
+    acc = profile['acceptance']
+
+    seg_t = [(i - seg_start) * dt_ms for i in range(seg_start, seg_end)]
+    seg_tgt = targets[seg_start:seg_end]
+    seg_y = measured[seg_start:seg_end]
+    seg_pl = pwm_l[seg_start:seg_end]
+    seg_pr = pwm_r[seg_start:seg_end]
+    seg_cm = pwm_cm[seg_start:seg_end]
+    seg_dm = pwm_dm[seg_start:seg_end]
+
+    pre_idx = max(0, seg_start - 1)
+    y0 = measured[pre_idx]
+    seg_drive = seg_dm if kind == 'yaw' else seg_cm
+    drive0 = pwm_dm[pre_idx] if kind == 'yaw' else pwm_cm[pre_idx]
+
+    core = _compute_channel_metrics(seg_t, seg_tgt, seg_y, seg_pl, seg_pr, seg_drive, y0, drive0, dt_ms, acc, kind)
+    pwm_cm_peak = max(abs(x) for x in seg_cm)
+    pwm_dm_peak = max(abs(x) for x in seg_dm)
+
+    out: dict[str, Any] = {
+        'loop': loop_id,
+        'edge_used': edge_used,
+        'sample_count': len(seg_y),
+        'dt_ms': dt_ms,
+        'duration_ms': round(seg_t[-1], 1),
+        **core,
         'pwm_cm_peak': round(pwm_cm_peak, 0),
         'pwm_dm_peak': round(pwm_dm_peak, 0),
-        'status': status,
     }
+
+    # Independent L/R wheel diagnostics for classic 3-cascade dual-wheel speed loop
+    side = int(header.get('side', 3) or 3)
+    if loop_id == 'speed_3c' and side == 3:
+        enc_l = [float(r['enc_l']) for r in rows]
+        enc_r = [float(r['enc_r']) for r in rows]
+        left_m = _compute_channel_metrics(
+            seg_t, seg_tgt, enc_l[seg_start:seg_end], seg_pl, seg_pl, seg_pl, enc_l[pre_idx], pwm_l[pre_idx], dt_ms, acc, kind
+        )
+        right_m = _compute_channel_metrics(
+            seg_t, seg_tgt, enc_r[seg_start:seg_end], seg_pr, seg_pr, seg_pr, enc_r[pre_idx], pwm_r[pre_idx], dt_ms, acc, kind
+        )
+        keep_keys = ('rise_ms', 'overshoot_pct', 'steady_err_pct', 'tail_mae_pct', 'crossings', 'pwm_sat_pct', 'status', 'signed_shortfall')
+        out['left'] = {k: left_m[k] for k in keep_keys}
+        out['left']['osc_type'] = left_m['dynamics']['osc_type']
+        out['left']['tau_eff_ms'] = left_m['dynamics']['tau_eff_ms']
+        out['right'] = {k: right_m[k] for k in keep_keys}
+        out['right']['osc_type'] = right_m['dynamics']['osc_type']
+        out['right']['tau_eff_ms'] = right_m['dynamics']['tau_eff_ms']
+
+    return out
 
 
 def analyze_outer_m2(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1204,28 +1462,55 @@ def score_metrics(metrics: dict[str, Any], loop_id: str, goal: str = 'balanced')
     return round(score, 3)
 
 
-def is_acceptable(metrics: dict[str, Any], loop_id: str, goal: str = 'balanced') -> bool:
+def describe_acceptance_gaps(metrics: dict[str, Any], loop_id: str, goal: str = 'balanced') -> tuple[bool, list[str], str]:
+    """Return (acceptable, list_of_failed_criteria, summary_text), adapted from llm-pid-tuner pid_safety."""
     acc = LOOP_PROFILES[loop_id]['acceptance']
     weights = GOAL_PRESETS.get(goal, GOAL_PRESETS['balanced'])
-    max_ov = acc['max_overshoot_pct'] * weights['max_overshoot_scale']
-    return (
-        str(metrics.get('status', '')).upper() == 'STABLE'
-        and float(metrics.get('overshoot_pct', 999.0)) <= max_ov
-        and float(metrics.get('rise_ms', 9999.0)) <= acc['max_rise_ms']
-        and float(metrics.get('steady_err_pct', 999.0)) <= acc['max_steady_err_pct']
-        and float(metrics.get('tail_mae_pct', 999.0)) <= acc['max_tail_mae_pct']
-        and int(metrics.get('crossings', 99)) <= acc['max_crossings']
-        and float(metrics.get('pwm_sat_pct', 100.0)) <= acc['max_sat_pct']
-    )
+    max_ov = round(acc['max_overshoot_pct'] * weights['max_overshoot_scale'], 2)
+    gaps: list[str] = []
+
+    st = str(metrics.get('status', '')).upper()
+    if st != 'STABLE':
+        gaps.append(f'状态={st}')
+    ov = float(metrics.get('overshoot_pct', 999.0))
+    if ov > max_ov:
+        gaps.append(f'超调 {ov:.1f}%>{max_ov:.1f}%')
+    rise = float(metrics.get('rise_ms', 9999.0))
+    if rise > acc['max_rise_ms']:
+        gaps.append(f'上升 {rise:.0f}ms>{acc["max_rise_ms"]:.0f}ms')
+    st_err = float(metrics.get('steady_err_pct', 999.0))
+    if st_err > acc['max_steady_err_pct']:
+        gaps.append(f'静差 {st_err:.1f}%>{acc["max_steady_err_pct"]:.1f}%')
+    tail_mae = float(metrics.get('tail_mae_pct', 999.0))
+    if tail_mae > acc['max_tail_mae_pct']:
+        gaps.append(f'尾误差 {tail_mae:.1f}%>{acc["max_tail_mae_pct"]:.1f}%')
+    cross = int(metrics.get('crossings', 99))
+    if cross > acc['max_crossings']:
+        gaps.append(f'穿越 {cross}次>{acc["max_crossings"]}次')
+    sat = float(metrics.get('pwm_sat_pct', 100.0))
+    if sat > acc['max_sat_pct']:
+        gaps.append(f'饱和 {sat:.1f}%>{acc["max_sat_pct"]:.1f}%')
+
+    return (len(gaps) == 0), gaps, ('; '.join(gaps) if gaps else '全部指标已达标')
+
+
+def is_acceptable(metrics: dict[str, Any], loop_id: str, goal: str = 'balanced') -> bool:
+    ok, _gaps, _detail = describe_acceptance_gaps(metrics, loop_id, goal)
+    return ok
 
 
 def should_rollback(current: dict[str, Any], best: dict[str, Any], loop_id: str, goal: str = 'balanced') -> bool:
-    cur_score = score_metrics(current, loop_id, goal)
-    best_score = score_metrics(best, loop_id, goal)
-    if cur_score <= best_score:
-        return False
     best_st = str(best.get('status', '')).upper()
     cur_st = str(current.get('status', '')).upper()
+    best_rank = _STATUS_RANK.get(best_st, 5)
+    cur_rank = _STATUS_RANK.get(cur_st, 5)
+    # Never roll back to a strictly worse stability tier (e.g. from OVERSHOOTING back to OSCILLATING)
+    if cur_rank < best_rank:
+        return False
+    cur_score = score_metrics(current, loop_id, goal)
+    best_score = score_metrics(best, loop_id, goal)
+    if cur_score <= best_score and cur_rank <= best_rank:
+        return False
     if best_st == 'STABLE' and cur_st in ('OSCILLATING', 'SATURATED'):
         return True
     if float(current.get('overshoot_pct', 0.0)) > float(best.get('overshoot_pct', 0.0)) + 9.0:
@@ -1233,6 +1518,82 @@ def should_rollback(current: dict[str, Any], best: dict[str, Any], loop_id: str,
     if cur_score > max(best_score * 1.35, best_score + 8.0):
         return True
     return False
+
+
+def format_tuning_history_table(
+    history: list[dict[str, Any]],
+    best: dict[str, Any] | None = None,
+    last_rejected: dict[str, Any] | None = None,
+    max_recent: int = 6,
+) -> str:
+    """Compact pipe-delimited history table with explicit best/last_rejected anchors (llm-pid-tuner core/history)."""
+    if not history and best is None:
+        return '无历史记录（第 1 轮基线）'
+
+    def fmt_row(role: str, rec: dict[str, Any]) -> str:
+        m = rec.get('metrics') or {}
+        p_str = ','.join(f'{k}={v:g}' for k, v in (rec.get('parameters') or {}).items())
+        return '|'.join([
+            role,
+            str(rec.get('round', '?')),
+            p_str,
+            f'{float(m.get("rise_ms", 0)):.1f}',
+            f'{float(m.get("overshoot_pct", 0)):.1f}',
+            f'{float(m.get("steady_err_pct", 0)):.1f}',
+            f'{float(m.get("tail_mae_pct", 0)):.1f}',
+            str(int(m.get('crossings', 0))),
+            f'{float(m.get("pwm_sat_pct", 0)):.1f}',
+            str(m.get('status', '?')),
+            f'{float(rec.get("score", 0)):.2f}',
+            str(rec.get('action', '-'))[:32].replace('|', '/'),
+        ])
+
+    recent = history[-max_recent:]
+    recent_rounds = {r.get('round') for r in recent}
+    lines = ['role|round|params|rise_ms|ov%|steady%|tail_mae%|cross|sat%|status|score|action']
+    if best is not None and best.get('round') not in recent_rounds:
+        lines.append(fmt_row('best', best))
+    if last_rejected is not None and last_rejected.get('round') not in recent_rounds:
+        lines.append(fmt_row('last_rejected', last_rejected))
+    for rec in recent:
+        if best is not None and rec.get('round') == best.get('round'):
+            role = 'best'
+        elif rec.get('action') == 'ROLLBACK' or (last_rejected is not None and rec.get('round') == last_rejected.get('round')):
+            role = 'last_rejected'
+        else:
+            role = 'recent'
+        lines.append(fmt_row(role, rec))
+    return '\n'.join(lines)
+
+
+def compute_sensitivity_hints(history: list[dict[str, Any]], max_items: int = 4) -> list[str]:
+    """Summarize empirical parameter->metric deltas between consecutive measured rounds."""
+    if len(history) < 2:
+        return []
+    hints: list[str] = []
+    for prev, cur in zip(history[:-1], history[1:]):
+        p0 = prev.get('parameters') or {}
+        p1 = cur.get('parameters') or {}
+        diffs = []
+        for k in sorted(set(p0) | set(p1)):
+            if k in p0 and k in p1 and abs(float(p1[k]) - float(p0[k])) > 1e-6:
+                d = float(p1[k]) - float(p0[k])
+                diffs.append(f'{k} {p0[k]:g}->{p1[k]:g} ({d:+g})')
+        if not diffs:
+            continue
+        m0 = prev.get('metrics') or {}
+        m1 = cur.get('metrics') or {}
+        s0 = float(prev.get('score', 0))
+        s1 = float(cur.get('score', 0))
+        verdict = '改善' if s1 < s0 - 0.5 else ('劣化' if s1 > s0 + 0.5 else '持平')
+        hints.append(
+            f'R{prev["round"]}->R{cur["round"]}: {", ".join(diffs)} => '
+            f'rise {m0.get("rise_ms", "?")}->{m1.get("rise_ms", "?")}ms, '
+            f'ov {m0.get("overshoot_pct", "?")}->{m1.get("overshoot_pct", "?")}%, '
+            f'steady {m0.get("steady_err_pct", "?")}->{m1.get("steady_err_pct", "?")}%, '
+            f'score {s0:.1f}->{s1:.1f} ({verdict})'
+        )
+    return hints[-max_items:]
 
 
 def _param_signature(params: dict[str, float]) -> tuple[tuple[str, float], ...]:
@@ -1248,10 +1609,11 @@ def build_rule_proposal(
     rejected: set[tuple[tuple[str, float], ...]],
     goal: str = 'balanced',
 ) -> dict[str, Any]:
-    """Evidence-based zero-dependency PID tuning heuristic for TC264 smart cars.
+    """Evidence-based zero-dependency PID tuning engine with explicit Incremental vs Positional physics.
 
-    Used both in built-in offline auto-tune mode and as the conservative fallback
-    when an external LLM provider times out or returns unparseable output.
+    Differentiates high-frequency Kp chatter from low-frequency Ki overshoot, respects
+    incremental PI Kp/Ki pole-zero balance (Kp/Ki ~ tau/Ts), supports independent L/R
+    wheel calibration in speed_3c, and serves as safe fallback for external LLMs.
     """
     acc = LOOP_PROFILES[loop_id]['acceptance']
     weights = GOAL_PRESETS.get(goal, GOAL_PRESETS['balanced'])
@@ -1265,145 +1627,196 @@ def build_rule_proposal(
     tail_mae = float(metrics.get('tail_mae_pct', 0.0))
     crossings = int(metrics.get('crossings', 0))
     sat = float(metrics.get('pwm_sat_pct', 0.0))
+    signed_shortfall = float(metrics.get('signed_shortfall', 0.0))
+    dyn = metrics.get('dynamics') if isinstance(metrics.get('dynamics'), dict) else {}
+    osc_type = str(dyn.get('osc_type') or 'none')
+    tau_est = dyn.get('tau_eff_ms')
+    implied_ff = dyn.get('implied_ff_hint')
 
     # Detect if previous step worsened score -> damp step scale
-    step_scale = 0.85 if len(history) >= 2 and history[-1].get('score', 0) > history[-2].get('score', 0) else 1.0
+    step_scale = 0.80 if len(history) >= 2 and history[-1].get('score', 0) > history[-2].get('score', 0) else 1.0
 
     def nudge(key: str, frac: float) -> None:
         if key not in prop or key not in bounds:
             return
         sp = bounds[key]
         cur_v = prop[key]
-        span = sp['max_step'] * step_scale
+        if frac < 0:
+            # Backing down an over-tuned/oscillating gain may safely cut up to 45% per round
+            span = max(sp['max_step'], abs(cur_v) * 0.45) * step_scale
+        else:
+            span = sp['max_step'] * step_scale
         if cur_v <= 1e-6 and frac > 0:
-            delta = span * min(0.5, frac)
+            delta = span * min(0.55, frac)
         else:
             delta = cur_v * frac
             if abs(delta) > span:
                 delta = math.copysign(span, delta)
         prop[key] = max(sp['min'], min(sp['max'], cur_v + delta))
 
+    # Check if the latest round worsened after cutting Kp -> flip priority to cutting Ki (phase lag)
+    prev_kp_cut_worsened = False
+    if len(history) >= 2:
+        h_prev, h_cur = history[-2], history[-1]
+        if h_cur.get('score', 0) > h_prev.get('score', 0) + 2.0 and h_cur.get('action') in ('DAMP_HIGH_FREQ_P', 'ROLLBACK'):
+            prev_kp_cut_worsened = True
+
+    def tune_incremental_pi_pair(kp_key: str, ki_key: str, sub_m: dict[str, Any], label: str) -> tuple[str, str]:
+        """Apply incremental PI physics: dU = Kp*(e[k]-e[k-1]) + Ki*e[k], Kd=0."""
+        s_st = str(sub_m.get('status', status)).upper()
+        s_ov = float(sub_m.get('overshoot_pct', ov))
+        s_rise = float(sub_m.get('rise_ms', rise))
+        s_err = float(sub_m.get('steady_err_pct', st_err))
+        s_tail = float(sub_m.get('tail_mae_pct', tail_mae))
+        s_cross = int(sub_m.get('crossings', crossings))
+        s_sat = float(sub_m.get('pwm_sat_pct', sat))
+        s_osc = str(sub_m.get('osc_type') or osc_type)
+        s_tau = sub_m.get('tau_eff_ms') if sub_m.get('tau_eff_ms') is not None else tau_est
+
+        cur_kp = max(1e-6, prop[kp_key])
+        cur_ki = prop[ki_key]
+        ratio = cur_kp / max(cur_ki, 1e-6)
+        target_ratio = max(8.0, min(24.0, (float(s_tau) if s_tau else 30.0) / 2.0))
+
+        # High-frequency Kp buzzing ONLY when osc_type is truly high-freq AND Ki isn't clearly dominating
+        if s_osc == 'high_freq_p_chatter' and not prev_kp_cut_worsened and ratio >= target_ratio * 0.85:
+            nudge(kp_key, -0.26)
+            nudge(ki_key, -0.08)
+            return 'DAMP_HIGH_FREQ_P', f'{label}检测到高频锯齿振荡（穿越 {s_cross} 次），主降增量 Kp 压振并小幅回调 Ki。'
+        if s_st == 'OSCILLATING' or s_cross >= 5:
+            # In a 2nd-order / cascade plant, excess Ki causes -90 deg phase lag oscillation;
+            # cutting Ki harder than Kp INCREASES Kp/Ki (restores phase lead margin!).
+            if prev_kp_cut_worsened or ratio < target_ratio * 1.15:
+                nudge(ki_key, -0.45)
+                nudge(kp_key, -0.22)
+                return 'DAMP_PHASE_LAG_I', f'{label}存在振荡（穿越 {s_cross} 次，Kp/Ki={ratio:.1f}），主砍积分 Ki 恢复相位裕度并同步适度降 Kp。'
+            nudge(kp_key, -0.28)
+            nudge(ki_key, -0.35)
+            return 'DAMP_OSCILLATION', f'{label}出现振荡（穿越 {s_cross} 次），同步回调 Kp 与 Ki。'
+        if s_ov > max_ov:
+            # In incremental PI, low-freq overshoot is usually excess Ki (or Kp braking too weak vs Ki)
+            nudge(ki_key, -0.42)
+            if ratio < target_ratio * 0.45 and s_cross <= 2 and s_sat < 35.0:
+                nudge(kp_key, 0.12)
+                return 'REDUCE_I_ADD_P_BRAKE', f'{label}低频超调 {s_ov:.1f}% 且 Kp/Ki={ratio:.1f} 偏低，主降 Ki 并微补 Kp 刹车阻尼。'
+            nudge(kp_key, -0.10)
+            return 'REDUCE_OVERSHOOT', f'{label}超调 {s_ov:.1f}% 偏大，主降增量 Ki 并微调 Kp 抑制过冲。'
+        if s_rise > acc['max_rise_ms'] or s_st == 'SLOW_RESPONSE':
+            very_slow = s_st == 'SLOW_RESPONSE' and s_ov < 2.0 and s_sat < 20.0
+            if ratio > target_ratio * 1.5 or cur_ki <= bounds[ki_key]['min'] * 3.0 or s_err > 5.0:
+                nudge(kp_key, 0.45 if very_slow else 0.28)
+                nudge(ki_key, 0.65 if very_slow else 0.40)
+                return 'BOOST_KP_AND_KI', f'{label}响应偏慢（上升 {s_rise:.0f} ms，静差 {s_err:.1f}%），增量式同步提升 Kp 与 Ki 避免积分推力不足。'
+            if ratio < target_ratio * 0.55:
+                nudge(kp_key, 0.45 if very_slow else 0.28)
+                return 'BOOST_KP_BRAKE', f'{label}上升 {s_rise:.0f} ms 且 Kp/Ki 偏低，优先提升增量 Kp 加快初段起势。'
+            nudge(kp_key, 0.38 if very_slow else 0.25)
+            nudge(ki_key, 0.35 if very_slow else 0.22)
+            return 'BOOST_KP_AND_KI', f'{label}上升 {s_rise:.0f} ms 偏慢，按比例同步提升增量 Kp 与 Ki。'
+        if s_err > acc['max_steady_err_pct'] or s_tail > acc['max_tail_mae_pct']:
+            nudge(ki_key, 0.32)
+            return 'BOOST_KI', f'{label}存在稳态静差 {s_err:.1f}%（尾误差 {s_tail:.1f}%），提升增量 Ki 补足持续推力。'
+        nudge(kp_key, 0.06 if s_rise > acc['max_rise_ms'] * 0.72 else -0.04)
+        return 'FINE_TUNE', f'{label}已接近目标窗口，做小步细调验证裕度。'
+
     if loop_id == 'yaw_2s1p':
-        if status == 'OSCILLATING' or crossings >= 5:
-            nudge('ykp', -0.22)
-            nudge('yki', -0.30)
-            summary = f'检测到角速度振荡（穿越 {crossings} 次），保守回调 ykp 并减小 yki。'
+        if osc_type == 'high_freq_p_chatter':
+            nudge('ykp', -0.28)
+            nudge('yki', -0.35)
+            summary = f'检测到高频角速度抽振（穿越 {crossings} 次），主降直出 ykp 并压低 yki。'
+            action = 'DAMP_HIGH_FREQ_P'
+        elif status == 'OSCILLATING' or crossings >= 5:
+            nudge('ykp', -0.24)
+            nudge('yki', -0.45)
+            summary = f'检测到角速度振荡（穿越 {crossings} 次），回调 ykp 并大幅压低 yki。'
             action = 'DAMP_OSCILLATION'
         elif ov > max_ov:
-            nudge('ykp', -0.15)
-            nudge('yki', -0.25)
-            if sat > 40.0:
-                nudge('yff', -0.08)
-            summary = f'角速度超调 {ov:.1f}% 偏高，适度降低 ykp/yki 抑制过冲。'
+            if current.get('yki', 0.0) > 0.12 and (osc_type == 'low_freq_i_swing' or crossings <= 3):
+                nudge('yki', -0.45)
+                nudge('ykp', -0.14)
+                summary = f'角速度低频过冲 {ov:.1f}%，大幅削减积分 yki 并适度微降 ykp。'
+            else:
+                nudge('ykp', -0.22)
+                nudge('yki', -0.38)
+                summary = f'角速度超调 {ov:.1f}% 偏高，降低 ykp/yki 抑制过冲。'
+            if sat > 30.0 or current.get('yff', 0.0) > 2.2 or (implied_ff is not None and current.get('yff', 0.0) > implied_ff * 0.85):
+                nudge('yff', -0.14)
             action = 'REDUCE_OVERSHOOT'
         elif st_err > acc['max_steady_err_pct'] and rise <= acc['max_rise_ms'] * 1.15:
-            # Under-tracked steady plateau -> boost feedforward first, small Ki
-            nudge('yff', 0.16)
-            if current.get('yki', 0.0) < 0.25:
-                nudge('yki', 0.25)
-            summary = f'角速度稳态静差 {st_err:.1f}%，优先补前馈 yff 并微加 yki。'
-            action = 'BOOST_FF_AND_I'
+            ff_dir = 1.0 if signed_shortfall >= 0 else -1.0
+            nudge('yff', 0.22 * ff_dir)
+            if ff_dir > 0 and current.get('yki', 0.0) < 0.22:
+                nudge('yki', 0.30)
+            elif ff_dir < 0 and current.get('yki', 0.0) > 0.05:
+                nudge('yki', -0.30)
+            summary = f'角速度稳态静差 {st_err:.1f}%，优先沿误差方向修正零滞后前馈 yff 并微调 yki。'
+            action = 'TUNE_FF_AND_I'
         elif rise > acc['max_rise_ms'] or status == 'SLOW_RESPONSE':
-            boost = 0.45 if (status == 'SLOW_RESPONSE' and ov < 1.5 and sat < 15.0 and st_err > 12.0) else 0.24
-            nudge('ykp', boost)
-            if st_err > 2.5:
-                nudge('yff', 0.26 if st_err > 12.0 else 0.12)
-            summary = f'角速度上升偏慢（{rise:.0f} ms，静差 {st_err:.1f}%），提升直出比例增益 ykp 加快响应。'
-            action = 'BOOST_KP'
+            very_slow = status == 'SLOW_RESPONSE' and ov < 2.0 and sat < 18.0 and st_err > 10.0
+            nudge('ykp', 0.50 if very_slow else 0.32)
+            if st_err > 2.5 and signed_shortfall >= 0:
+                nudge('yff', 0.35 if very_slow else 0.20)
+            if very_slow and current.get('yki', 0.0) < 0.08:
+                nudge('yki', 0.40)
+            summary = f'角速度上升偏慢（{rise:.0f} ms，静差 {st_err:.1f}%），提升直出 ykp 并补足前馈 yff。'
+            action = 'BOOST_KP_AND_FF'
         elif tail_mae > acc['max_tail_mae_pct']:
-            nudge('ykp', 0.10)
-            nudge('yff', 0.06)
-            summary = f'尾部跟踪误差 {tail_mae:.1f}% 偏大，小幅补强 ykp 与 yff。'
+            nudge('ykp', 0.12)
+            nudge('yff', 0.08 if signed_shortfall >= 0 else -0.06)
+            summary = f'尾部跟踪误差 {tail_mae:.1f}% 偏大，小幅细调 ykp 与 yff。'
             action = 'FINE_TUNE'
         else:
             nudge('ykp', 0.06 if rise > acc['max_rise_ms'] * 0.7 else -0.04)
             summary = '已接近目标窗口，做小步细调以验证最优裕度。'
             action = 'FINE_TUNE'
     elif loop_id == 'speed_2s1p':
-        if status == 'OSCILLATING' or crossings >= 5:
-            nudge('vkp', -0.20)
-            nudge('vki', -0.25)
-            summary = f'均速环出现振荡（穿越 {crossings} 次），同步下调 vkp/vki。'
+        if osc_type == 'high_freq_p_chatter':
+            nudge('vkp', -0.26)
+            nudge('vki', -0.18)
+            summary = f'均速环高频振荡（穿越 {crossings} 次），主降 vkp 并微回调 vki。'
+            action = 'DAMP_HIGH_FREQ_P'
+        elif status == 'OSCILLATING' or crossings >= 5:
+            nudge('vkp', -0.22)
+            nudge('vki', -0.40)
+            summary = f'均速环出现振荡（穿越 {crossings} 次），同步下调 vkp 并大幅回调 vki。'
             action = 'DAMP_OSCILLATION'
         elif ov > max_ov:
-            nudge('vkp', -0.14)
-            nudge('vki', -0.22)
-            summary = f'均速超调 {ov:.1f}% 偏大，适当减小 vkp 与积分 vki。'
+            nudge('vki', -0.42)
+            nudge('vkp', -0.10)
+            summary = f'均速超调 {ov:.1f}% 偏大，主降积分 vki 并微回调 vkp。'
             action = 'REDUCE_OVERSHOOT'
         elif rise > acc['max_rise_ms'] or status == 'SLOW_RESPONSE':
-            boost = 0.40 if (status == 'SLOW_RESPONSE' and ov < 1.5 and sat < 15.0 and st_err > 12.0) else 0.22
-            nudge('vkp', boost)
-            if st_err > acc['max_steady_err_pct']:
-                nudge('vki', 0.20)
-            summary = f'均速上升时间 {rise:.0f} ms 偏慢，提升均速 Kp 加快跟踪。'
+            very_slow = status == 'SLOW_RESPONSE' and ov < 2.0 and sat < 18.0
+            nudge('vkp', 0.50 if very_slow else 0.32)
+            if st_err > acc['max_steady_err_pct'] or current.get('vki', 0.0) < 0.85:
+                nudge('vki', 0.55 if very_slow else 0.35)
+            summary = f'均速上升时间 {rise:.0f} ms 偏慢，提升 vkp（并按需补足 vki）加快跟踪。'
             action = 'BOOST_KP'
         elif st_err > acc['max_steady_err_pct'] or tail_mae > acc['max_tail_mae_pct']:
-            nudge('vki', 0.24)
-            summary = f'均速存在 {st_err:.1f}% 稳态偏差，适度增加均速 Ki 消除静差。'
+            nudge('vki', 0.28)
+            summary = f'均速存在 {st_err:.1f}% 稳态偏差，适度增加均速 vki 消除静差。'
             action = 'BOOST_KI'
         else:
             nudge('vkp', 0.06)
             summary = '均速响应平稳，微增 vkp 测试是否能进一步缩短上升时间。'
             action = 'FINE_TUNE'
     elif loop_id == 'speed_3c':
-        if status == 'OSCILLATING' or crossings >= 5:
-            for k in ('lkp', 'rkp'):
-                nudge(k, -0.18)
-            for k in ('lki', 'rki'):
-                nudge(k, -0.22)
-            summary = f'三串轮速振荡（穿越 {crossings} 次），保守回调左右轮 Kp/Ki。'
-            action = 'DAMP_OSCILLATION'
-        elif ov > max_ov:
-            for k in ('lkp', 'rkp'):
-                nudge(k, -0.12)
-            for k in ('lki', 'rki'):
-                nudge(k, -0.20)
-            summary = f'轮速超调 {ov:.1f}%，减小左右轮 Kp/Ki 抑制超调。'
-            action = 'REDUCE_OVERSHOOT'
-        elif rise > acc['max_rise_ms'] or status == 'SLOW_RESPONSE':
-            for k in ('lkp', 'rkp'):
-                nudge(k, 0.22)
-            if st_err > acc['max_steady_err_pct']:
-                for k in ('lki', 'rki'):
-                    nudge(k, 0.16)
-            summary = f'轮速上升 {rise:.0f} ms 偏慢，提升左右轮 Kp。'
-            action = 'BOOST_KP'
-        elif st_err > acc['max_steady_err_pct']:
-            for k in ('lki', 'rki'):
-                nudge(k, 0.22)
-            summary = f'轮速稳态静差 {st_err:.1f}%，增加左右轮 Ki。'
-            action = 'BOOST_KI'
+        left_m = metrics.get('left') if isinstance(metrics.get('left'), dict) else None
+        right_m = metrics.get('right') if isinstance(metrics.get('right'), dict) else None
+        if left_m and right_m:
+            act_l, sum_l = tune_incremental_pi_pair('lkp', 'lki', left_m, '左轮')
+            act_r, sum_r = tune_incremental_pi_pair('rkp', 'rki', right_m, '右轮')
+            action = act_l if act_l == act_r else 'ADJUST_LR_INDEPENDENT'
+            summary = sum_l if act_l == act_r else f'{sum_l} {sum_r}'
         else:
-            for k in ('lkp', 'rkp'):
-                nudge(k, 0.06)
-            summary = '进入细调，微升轮速 Kp 检查响应裕度。'
-            action = 'FINE_TUNE'
+            act_l, sum_l = tune_incremental_pi_pair('lkp', 'lki', metrics, '双轮')
+            tune_incremental_pi_pair('rkp', 'rki', metrics, '双轮')
+            action, summary = act_l, sum_l
     elif loop_id == 'yaw_3c':
-        if status == 'OSCILLATING' or crossings >= 5:
-            nudge('ykp', -0.20)
-            nudge('yki', -0.25)
-            summary = f'三串角速度中环振荡（穿越 {crossings} 次），回调 ykp/yki。'
-            action = 'DAMP_OSCILLATION'
-        elif ov > max_ov:
-            nudge('ykp', -0.14)
-            nudge('yki', -0.20)
-            summary = f'角速度中环超调 {ov:.1f}%，回调 ykp/yki。'
-            action = 'REDUCE_OVERSHOOT'
-        elif rise > acc['max_rise_ms'] or status == 'SLOW_RESPONSE':
-            nudge('ykp', 0.22)
-            summary = f'角速度中环偏慢（{rise:.0f} ms），提升 ykp。'
-            action = 'BOOST_KP'
-        elif st_err > acc['max_steady_err_pct']:
-            nudge('yki', 0.22)
-            summary = f'角速度中环存在 {st_err:.1f}% 稳态偏差，微增 yki。'
-            action = 'BOOST_KI'
-        else:
-            nudge('ykp', 0.06)
-            summary = '角速度中环进入细调阶段。'
-            action = 'FINE_TUNE'
+        action, summary = tune_incremental_pi_pair('ykp', 'yki', metrics, '三串角速度中环')
     else:  # outer
         if status == 'OSCILLATING' or crossings >= 8:
-            nudge('dirp_cur', -0.15)
+            nudge('dirp_cur', -0.16)
             nudge('dird_cur', 0.18)
             summary = f'视觉循迹摆动偏大（穿越 {crossings} 次），降外环 Kp 并补 Kd 阻尼。'
             action = 'DAMP_OUTER'
@@ -1418,16 +1831,21 @@ def build_rule_proposal(
             action = 'FINE_TUNE'
 
     safe, notes = check_and_clamp_proposal(current, prop, bounds, strict=False)
-    # Avoid repeating an already-rejected parameter point
+    # Bidirectional escape if proposal repeats a rejected or identical point
     if _param_signature(safe) in rejected or _param_signature(safe) == _param_signature(current):
-        for key in bounds:
-            sp = bounds[key]
-            mid = round(max(sp['min'], min(sp['max'], current[key] + sp['max_step'] * 0.25)), int(sp.get('decimals', 3)))
-            alt = dict(current)
-            alt[key] = mid
-            if _param_signature(alt) not in rejected and _param_signature(alt) != _param_signature(current):
-                safe = alt
-                notes.append(f'避开已拒绝参数点，对 {key} 做 1/4 步长试探')
+        found_alt = False
+        for frac in (-0.30, 0.30, -0.18, 0.18):
+            for key in bounds:
+                sp = bounds[key]
+                cand_v = round(max(sp['min'], min(sp['max'], current[key] + sp['max_step'] * frac)), int(sp.get('decimals', 3)))
+                alt = dict(current)
+                alt[key] = cand_v
+                if _param_signature(alt) not in rejected and _param_signature(alt) != _param_signature(current):
+                    safe = alt
+                    notes.append(f'避开已拒绝/重复参数点，对 {key} 做 {frac:+.0%} 步长试探')
+                    found_alt = True
+                    break
+            if found_alt:
                 break
 
     return {
@@ -1480,6 +1898,45 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def parse_llm_proposal_response(text: str, bounds: dict[str, dict[str, float]]) -> dict[str, Any] | None:
+    """Multi-strategy proposal parser (nested JSON, flat declared-key JSON, or key=val text)."""
+    declared = set(bounds.keys())
+    obj = extract_json_object(text)
+    if obj:
+        raw_params = obj.get('parameters') if isinstance(obj.get('parameters'), dict) else None
+        if raw_params is None:
+            # Accept flat JSON where declared parameter keys sit at top level
+            flat = {k: obj[k] for k in declared if k in obj and not isinstance(obj[k], bool)}
+            if flat:
+                raw_params = flat
+        action = str(obj.get('tuning_action') or 'ADJUST_PARAMETERS').strip().upper()
+        if raw_params is not None or action == 'OBSERVE':
+            return {
+                'parameters': raw_params or {},
+                'tuning_action': 'OBSERVE' if action == 'OBSERVE' else 'ADJUST_PARAMETERS',
+                'status': 'DONE' if str(obj.get('status', '')).strip().upper() == 'DONE' else 'TUNING',
+                'analysis_summary': str(obj.get('analysis_summary') or obj.get('analysis') or '模型已给出下一轮参数建议。')[:280],
+            }
+
+    # Structured plain-text fallback (e.g. ykp=14.5, yff=1.95 ...)
+    extracted: dict[str, float] = {}
+    for key in declared:
+        m = re.search(rf'\b{re.escape(key)}\s*[:=]\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))', text or '', re.IGNORECASE)
+        if m:
+            val = float(m.group(1))
+            if math.isfinite(val):
+                extracted[key] = val
+    if extracted:
+        status_m = re.search(r'\b(DONE|TUNING)\b', text or '', re.IGNORECASE)
+        return {
+            'parameters': extracted,
+            'tuning_action': 'ADJUST_PARAMETERS',
+            'status': status_m.group(1).upper() if status_m else 'TUNING',
+            'analysis_summary': (text or '').strip().splitlines()[0][:240] or '从文本解析出下一轮参数建议。',
+        }
+    return None
+
+
 def call_llm_proposal(
     *,
     provider: str,
@@ -1496,54 +1953,59 @@ def call_llm_proposal(
     user_note: str,
     reasoning_effort: str = 'medium',
     cli_tool: str = 'auto',
+    waveform_csv: str = '',
+    last_rejected: dict[str, Any] | None = None,
+    rejected_sigs: set[tuple[tuple[str, float], ...]] | None = None,
     timeout_s: float = 25.0,
 ) -> dict[str, Any]:
-    """Request next bounded parameter proposal from OpenAI-compatible, Ollama, or Anthropic API."""
+    """Request next bounded parameter proposal with extrema-preserving waveform & dynamics evidence."""
     profile = LOOP_PROFILES[loop_id]
     eff_key = normalize_effort(reasoning_effort)
     eff_cfg = REASONING_LEVELS[eff_key]
+    _ok, gaps, gap_detail = describe_acceptance_gaps(metrics, loop_id, goal)
+    history_table = format_tuning_history_table(history, best_record, last_rejected)
+    sens_hints = compute_sensitivity_hints(history)
+
     system_prompt = (
-        '你是 TC264 智能车（差速视觉车，支持两串一并 2S1P 与传统三串）控制整定工程师。'
-        '根据实测阶跃指标和历史轮次，给出下一轮有界参数建议。\n'
+        '你是 TC264 智能车（差速视觉车，支持两串一并 2S1P 与传统三串）控制整定专家。\n'
+        f'当前环路：{profile["label"]}（控制形式：{profile["controller_form"]}）\n'
+        f'控制方程：{profile["equations"]}\n'
+        f'物理整定语义：{profile["tuning_semantics"]}\n'
         f'当前推理强度：{eff_cfg["label"]} ({eff_cfg["en"]}) — {eff_cfg["depth"]}\n'
         '硬性规则：\n'
-        '1. 只调整当前环路声明的参数，绝对不能超出 min/max 和单轮 max_step。\n'
-        '2. 优先保留已验证有效的参数，不要无依据清零积分或前馈；已经验证变差的方向不要重复试。\n'
-        '3. 如果指标已经稳定达标，保持参数并把 status 设为 "DONE"。\n'
-        '4. 严格输出单个合法 JSON 对象，不含 Markdown 代码块或多余文字：\n'
+        '1. 只调整当前环路声明的参数，绝对不能超出 min/max、单轮 max_step 与 max_ratio。\n'
+        '2. 仔细阅读 4 ms 极值保留波形（waveform_20pt_csv）、阶跃动力学辨识（osc_type/tau_eff_ms/implied_ff_hint）与未达标项（acceptance_gaps）：\n'
+        '   - 高频抽振（high_freq_p_chatter）主降 Kp；低频慢超调（low_freq_i_swing）主降 Ki。\n'
+        '   - 增量式 PI（speed_3c / yaw_3c）严重偏慢时需按 kp/ki ≈ τ/Ts 协同提升 Kp 与 Ki，避免单拉 Kp 造成尾段慢爬；speed_3c 需根据 left/right 实测独立微调左右轮。\n'
+        '   - 2S1P 角速度环有静差时优先沿误差方向调零滞后前馈 yff，少用大积分 yki。\n'
+        '3. 优先保留已验证有效参数，禁止重复 last_rejected 或 rejected_points 中已证明劣化的参数点；证据不足需观察时可输出 tuning_action="OBSERVE"。\n'
+        '4. 严格输出单个合法 JSON 对象，不要包含 Markdown 代码块或任何额外解释文字：\n'
         '{"parameters": {<声明的参数名>: <数值>}, "tuning_action": "ADJUST_PARAMETERS"|"OBSERVE", '
-        '"status": "TUNING"|"DONE", "analysis_summary": "一句话中文分析与调参依据"}'
+        '"status": "TUNING"|"DONE", "analysis_summary": "一句话中文诊断与改参依据"}'
     )
-    compact_history = [
-        {
-            'round': h['round'],
-            'action': h.get('action', ''),
-            'parameters': h['parameters'],
-            'metrics': {
-                k: h['metrics'].get(k)
-                for k in ('status', 'rise_ms', 'overshoot_pct', 'steady_err_pct', 'tail_mae_pct', 'crossings', 'pwm_sat_pct')
-            },
-            'score': h.get('score'),
-        }
-        for h in history[-6:]
-    ]
-    user_payload = {
+
+    rejected_list = [dict(sig) for sig in sorted(rejected_sigs or set())[-6:]]
+    user_payload: dict[str, Any] = {
         'loop': loop_id,
-        'loop_label': profile['label'],
-        'equations': profile['equations'],
         'goal_priority': goal,
         'user_note': (user_note or '').strip()[:300],
         'acceptance_limits': profile['acceptance'],
+        'acceptance_gaps': gaps,
+        'acceptance_detail': gap_detail,
         'parameter_bounds': bounds,
         'current_parameters': current,
         'current_metrics': metrics,
-        'best_verified': (
-            {'round': best_record['round'], 'parameters': best_record['parameters'], 'score': best_record['score']}
-            if best_record else None
-        ),
-        'recent_history': compact_history,
+        'sensitivity_hints': sens_hints,
+        'rejected_points': rejected_list,
     }
-    user_prompt = '当前实测数据如下，请输出下一轮 JSON 调参建议：\n' + json.dumps(user_payload, ensure_ascii=False)
+    sections = [
+        '## 实测历史表（best=历史最佳，last_rejected=最近劣化回滚点）\n' + history_table,
+        '## 当前状态与约束\n' + json.dumps(user_payload, ensure_ascii=False, separators=(',', ':')),
+    ]
+    if waveform_csv:
+        sections.append('## 4 ms 阶跃极值保留波形（含跃变沿、峰谷与 PWM 共/差模）\n' + waveform_csv)
+    sections.append('请基于上述实测曲线与历史敏感度，直接输出下一轮单个 JSON 对象：')
+    user_prompt = '\n\n'.join(sections)
 
     prov = provider.strip().lower()
     if prov == 'local_cli':
@@ -1554,10 +2016,11 @@ def call_llm_proposal(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             timeout_s=max(timeout_s, 75.0),
+            role='tune',
         )
     else:
         url = base_url.strip().rstrip('/')
-        headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.4'}
+        headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.6'}
 
         if prov == 'anthropic':
             endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
@@ -1607,16 +2070,26 @@ def call_llm_proposal(
             msg = choices[0].get('message', {}) if choices else {}
             text = str(msg.get('content') or '')
 
-    obj = extract_json_object(text)
-    if not obj or not isinstance(obj.get('parameters'), dict):
+    parsed = parse_llm_proposal_response(text, bounds)
+    if not parsed:
         raise ValueError(f'模型返回格式无法解析为参数 JSON：{text[:160]}')
 
-    safe_params, notes = check_and_clamp_proposal(current, obj['parameters'], bounds, strict=False)
+    if parsed['tuning_action'] == 'OBSERVE':
+        return {
+            'parameters': dict(current),
+            'tuning_action': 'OBSERVE',
+            'status': parsed['status'],
+            'analysis_summary': parsed['analysis_summary'],
+            'guardrail_notes': [],
+            'source': prov,
+        }
+
+    safe_params, notes = check_and_clamp_proposal(current, parsed['parameters'], bounds, strict=False)
     return {
         'parameters': safe_params,
-        'tuning_action': str(obj.get('tuning_action') or 'ADJUST_PARAMETERS').upper(),
-        'status': 'DONE' if str(obj.get('status', '')).upper() == 'DONE' else 'TUNING',
-        'analysis_summary': str(obj.get('analysis_summary') or '模型已给出下一轮参数建议。')[:280],
+        'tuning_action': 'ADJUST_PARAMETERS',
+        'status': parsed['status'],
+        'analysis_summary': parsed['analysis_summary'],
         'guardrail_notes': notes,
         'source': prov,
     }
@@ -1831,12 +2304,15 @@ def _compact_chat_context(
     best: dict[str, Any] | None,
     bounds: dict[str, dict[str, float]],
     dry_mode: bool,
+    last_waveform_csv: str = '',
+    last_dynamics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = LOOP_PROFILES[loop_id]
     cur = extract_params_for_loop(gp1, loop_id) if gp1 else None
     compact_bounds = {k: [v['min'], v['max'], v['max_step']] for k, v in bounds.items()}
     ctx: dict[str, Any] = {
         'loop': f'{loop_id} ({profile["label"]})',
+        'controller_form': profile['controller_form'],
         'dry': dry_mode,
         'cur': cur,
         'bounds_min_max_step': compact_bounds,
@@ -1845,6 +2321,8 @@ def _compact_chat_context(
         ctx['vbat_v'] = round(vbat_mv / 1000.0, 2)
     if live:
         ctx['live'] = live
+    if last_dynamics:
+        ctx['last_step_dynamics'] = last_dynamics
     if tune_history:
         ctx['recent'] = [
             {'r': r.get('round'), 'p': r.get('parameters'), 'm': r.get('metrics'), 's': r.get('score')}
@@ -1852,6 +2330,8 @@ def _compact_chat_context(
         ]
     if best:
         ctx['best'] = {'r': best.get('round'), 'p': best.get('parameters'), 's': best.get('score')}
+    if last_waveform_csv:
+        ctx['last_4ms_waveform_20pt'] = last_waveform_csv
     return ctx
 
 
@@ -1873,6 +2353,8 @@ def call_llm_chat_stream(
     bounds: dict[str, dict[str, float]],
     dry_mode: bool,
     cli_tool: str = 'auto',
+    last_waveform_csv: str = '',
+    last_dynamics: dict[str, Any] | None = None,
     on_delta: Callable[[str], None] | None = None,
     timeout_s: float = 35.0,
 ) -> dict[str, Any]:
@@ -1880,14 +2362,17 @@ def call_llm_chat_stream(
     t0 = time.perf_counter()
     eff_key = normalize_effort(reasoning_effort)
     eff_cfg = REASONING_LEVELS[eff_key]
+    profile = LOOP_PROFILES[loop_id]
     cur = extract_params_for_loop(gp1, loop_id) if gp1 else None
     ctx = _compact_chat_context(
         loop_id=loop_id, gp1=gp1, vbat_mv=vbat_mv, live=live,
         tune_history=tune_history, best=best, bounds=bounds, dry_mode=dry_mode,
+        last_waveform_csv=last_waveform_csv, last_dynamics=last_dynamics,
     )
 
     system_prompt = (
         '你是 TC264 智能车调参工作台（TunePro）里的控制工程搭档，用户正看着实时波形和摄像头画面和你交流。\n'
+        f'当前环路控制语义：{profile["tuning_semantics"]}\n'
         f'推理深度：{eff_cfg["label"]} — {eff_cfg["depth"]}\n'
         '输出规范：\n'
         '1. 直接用简洁自然的简体中文回复（2~4 句或短要点，不要套话，不要把整段包在 JSON 里），可用少量清晰 Markdown（如 **加粗**、`参数名=值`、短列表）。\n'
@@ -1916,11 +2401,12 @@ def call_llm_chat_stream(
             user_prompt=user_block,
             on_delta=filt.feed,
             timeout_s=max(timeout_s, 75.0),
+            role='chat',
         )
         filt.flush()
     else:
         url = base_url.strip().rstrip('/')
-        headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.5'}
+        headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.6'}
         if prov == 'anthropic':
             endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
             headers['x-api-key'] = api_key
@@ -2580,9 +3066,11 @@ class BridgeSession:
             raise RuntimeError('车端未返回有效阶跃抓拍数据')
 
         metrics = analyze_capture_rows(cap['header'], cap['rows'], loop_id)
+        waveform_csv = sample_capture_waveform(cap['header'], cap['rows'], loop_id, limit=20)
         return {
             'gp1': self.sync_gp1(),
             'metrics': metrics,
+            'waveform_csv': waveform_csv,
             'capture_header': cap['header'],
             'capture_rows': len(cap['rows']),
         }
@@ -2597,6 +3085,9 @@ class AITunerManager:
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._abort_ev = threading.Event()
+        self._last_waveform_csv: str = ''
+        self._last_dynamics: dict[str, Any] | None = None
+        self._last_capture_loop: str = ''
         self._state: dict[str, Any] = {
             'active': False,
             'phase': 'idle',
@@ -2747,6 +3238,11 @@ class AITunerManager:
         gp1 = res['gp1']
         params = extract_params_for_loop(gp1, loop_id)
         score = score_metrics(res['metrics'], loop_id)
+        ok, gaps, gap_detail = describe_acceptance_gaps(res['metrics'], loop_id)
+        with self._lock:
+            self._last_waveform_csv = str(res.get('waveform_csv') or '')
+            self._last_dynamics = deepcopy(res['metrics'].get('dynamics')) if isinstance(res['metrics'].get('dynamics'), dict) else None
+            self._last_capture_loop = loop_id
         return {
             'ok': True,
             'loop': loop_id,
@@ -2754,7 +3250,9 @@ class AITunerManager:
             'parameters': params,
             'metrics': res['metrics'],
             'score': score,
-            'acceptable': is_acceptable(res['metrics'], loop_id),
+            'acceptable': ok,
+            'acceptance_gaps': gaps,
+            'acceptance_detail': gap_detail,
             'capture_rows': res['capture_rows'],
             'source': 'mock_simulation' if self._is_mock_port() else 'measured_hardware',
         }
@@ -2889,6 +3387,8 @@ class AITunerManager:
         rejected: set[tuple[tuple[str, float], ...]] = set()
         history: list[dict[str, Any]] = []
         best: dict[str, Any] | None = None
+        last_rejected: dict[str, Any] | None = None
+        best_waveform_csv = ''
         stable_streak = 0
         reason = 'max_rounds_reached'
         fallback_note = ''
@@ -2913,8 +3413,14 @@ class AITunerManager:
                 gp1 = exp['gp1']
                 params = extract_params_for_loop(gp1, loop_id)
                 metrics = exp['metrics']
+                waveform_csv = str(exp.get('waveform_csv') or '')
                 score = score_metrics(metrics, loop_id, cfg['goal'])
-                ok = is_acceptable(metrics, loop_id, cfg['goal'])
+                ok, gaps, gap_detail = describe_acceptance_gaps(metrics, loop_id, cfg['goal'])
+
+                with self._lock:
+                    self._last_waveform_csv = waveform_csv
+                    self._last_dynamics = deepcopy(metrics.get('dynamics')) if isinstance(metrics.get('dynamics'), dict) else None
+                    self._last_capture_loop = loop_id
 
                 record: dict[str, Any] = {
                     'round': round_idx,
@@ -2923,26 +3429,23 @@ class AITunerManager:
                     'metrics': metrics,
                     'score': score,
                     'acceptable': ok,
+                    'acceptance_gaps': gaps,
+                    'acceptance_detail': gap_detail,
                     'action': 'BASELINE' if round_idx == 1 else 'EVALUATED',
                     'summary': '',
                     'guardrail_notes': [],
                 }
 
-                # Update best verified result (STABLE always beats non-STABLE; never promote OSCILLATING/SATURATED)
-                cur_st = metrics['status']
-                best_st = best['metrics']['status'] if best is not None else ''
-                promote = False
-                if cur_st == 'STABLE':
-                    promote = (best is None) or (best_st != 'STABLE') or (score < best['score'])
-                elif cur_st == 'SLOW_RESPONSE' and (best is None or (best_st != 'STABLE' and score < best['score'])):
-                    promote = True
-                elif best is None and round_idx == 1:
-                    promote = True
+                # Tiered best promotion: STABLE < SLOW_RESPONSE < OVERSHOOTING < SATURATED < OSCILLATING
+                cur_rank = _STATUS_RANK.get(str(metrics.get('status', '')).upper(), 5)
+                best_rank = _STATUS_RANK.get(str(best['metrics'].get('status', '')).upper(), 5) if best is not None else 99
+                promote = (best is None) or (cur_rank < best_rank) or (cur_rank == best_rank and score < best['score'])
                 if promote:
                     for prev_r in history:
                         prev_r.pop('is_best', None)
                     record['is_best'] = True
                     best = deepcopy(record)
+                    best_waveform_csv = waveform_csv
 
                 if ok:
                     stable_streak += 1
@@ -2967,6 +3470,7 @@ class AITunerManager:
                     verified_back = extract_params_for_loop(gp1, loop_id)
                     record['action'] = 'ROLLBACK'
                     record['summary'] = f'响应劣化（状态 {metrics["status"]}，超调 {metrics["overshoot_pct"]}%），已自动回滚并核验第 {best["round"]} 轮参数。'
+                    last_rejected = deepcopy(record)
                     rolled_back = True
                     params = verified_back
 
@@ -2995,10 +3499,11 @@ class AITunerManager:
                 # Propose next bounded update
                 self._update_state(
                     phase='analyzing',
-                    message=f'第 {round_idx}/{cfg["max_rounds"]} 轮：分析响应指标并生成下一轮有界参数…',
+                    message=f'第 {round_idx}/{cfg["max_rounds"]} 轮：分析 4 ms 波形特征并生成下一轮有界参数…',
                 )
                 ref_params = best['parameters'] if rolled_back and best is not None else params
                 ref_metrics = best['metrics'] if rolled_back and best is not None else metrics
+                ref_waveform = best_waveform_csv if (rolled_back and best_waveform_csv) else waveform_csv
 
                 if ok:
                     # Hold verified acceptable gains for confirmation window (from llm-pid-tuner skill!)
@@ -3027,7 +3532,17 @@ class AITunerManager:
                             user_note=cfg['user_note'],
                             reasoning_effort=cfg.get('reasoning_effort', 'medium'),
                             cli_tool=cfg.get('cli_tool', 'auto'),
+                            waveform_csv=ref_waveform,
+                            last_rejected=last_rejected,
+                            rejected_sigs=rejected,
                         )
+                        # Intercept LLM proposals that repeat a previously rejected or zero-delta point
+                        if suggestion.get('tuning_action') != 'OBSERVE':
+                            sig = _param_signature(suggestion['parameters'])
+                            if sig in rejected or sig == _param_signature(ref_params):
+                                guard_reason = 'LLM 建议命中已回滚参数点' if sig in rejected else 'LLM 建议与当前参数完全一致'
+                                suggestion = build_rule_proposal(loop_id, ref_params, ref_metrics, bounds, history, rejected, cfg['goal'])
+                                suggestion['guardrail_notes'] = [f'{guard_reason}，护栏自动切至安全试探点', *suggestion.get('guardrail_notes', [])]
                     except Exception as exc:
                         fallback_note = f'LLM 调用失败（{str(exc)[:80]}），已切保守规则兜底。'
                         suggestion = build_rule_proposal(loop_id, ref_params, ref_metrics, bounds, history, rejected, cfg['goal'])
@@ -3198,6 +3713,8 @@ class AITunerManager:
         with self._lock:
             tune_history = deepcopy(self._state.get('history', []))
             best = deepcopy(self._state.get('best'))
+            last_wf = self._last_waveform_csv if self._last_capture_loop == loop_id else ''
+            last_dyn = deepcopy(self._last_dynamics) if self._last_capture_loop == loop_id else None
 
         if provider == 'rule':
             res = _build_offline_chat_reply(
@@ -3235,6 +3752,8 @@ class AITunerManager:
                 bounds=bounds,
                 dry_mode=dry_mode,
                 cli_tool=cli_tool,
+                last_waveform_csv=last_wf,
+                last_dynamics=last_dyn,
                 on_delta=on_delta,
             )
         except Exception as exc:

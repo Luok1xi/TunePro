@@ -193,7 +193,7 @@ class AppHandler(BaseHTTPRequestHandler):
             path = parsed.path
             qs = urllib.parse.parse_qs(parsed.query)
             if path == '/api/health':
-                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.5', 'demo': DEMO_MODE, 'ai_tuner': True, 'ai_chat': True, 'ai_stream': True, 'raw_stream': True, 'local_cli': True})
+                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.6', 'demo': DEMO_MODE, 'ai_tuner': True, 'ai_chat': True, 'ai_stream': True, 'raw_stream': True, 'local_cli': True})
             if path == '/api/serial/ports':
                 return self._send_json({
                     'ports': serial_bridge.list_serial_ports(include_demo=True, demo_first=DEMO_MODE),

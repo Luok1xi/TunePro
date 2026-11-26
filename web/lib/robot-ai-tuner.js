@@ -986,15 +986,17 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
       for (let i = lastAnnouncedRound; i < rows.length; i++) {
         const r = rows[i];
         const m = r.metrics || {};
+        const roundInsights = [
+          `参数：${fmtParams(r.parameters)}`,
+          `上升 ${m.rise_ms ?? '—'} ms · 超调 ${m.overshoot_pct ?? '—'}% · 静差 ${m.steady_err_pct ?? '—'}% · 饱和 ${m.pwm_sat_pct ?? '—'}% · 评分 ${r.score}`,
+        ];
+        if (r.acceptance_detail) roundInsights.push(`验收判定：${r.acceptance_detail}`);
         appendMessage({
           role: 'assistant',
           kind: 'live-event',
           meta: `自动调参 · 第 ${r.round} 轮`,
           text: r.summary || `第 ${r.round} 轮 4 ms 阶跃采集完成（${m.status || '—'}）。`,
-          insights: [
-            `参数：${fmtParams(r.parameters)}`,
-            `上升 ${m.rise_ms ?? '—'} ms · 超调 ${m.overshoot_pct ?? '—'}% · 静差 ${m.steady_err_pct ?? '—'}% · 饱和 ${m.pwm_sat_pct ?? '—'}% · 评分 ${r.score}`,
-          ],
+          insights: roundInsights,
         });
       }
       lastAnnouncedRound = rows.length;
@@ -1069,6 +1071,11 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     lastAnnouncedRound = 0;
     wasAutoActive = true;
     updateControls();
+    const userNote = elChatInput.value.trim().slice(0, 300);
+    if (userNote) {
+      elChatInput.value = '';
+      elChatInput.style.height = 'auto';
+    }
     try {
       const r = await fetch('/api/ai/start', {
         method: 'POST',
@@ -1086,6 +1093,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
           max_rounds: eff.rounds,
           goal: elGoal.value,
           dry_mode: elDry.checked,
+          user_note: userNote,
           allow_real_car: elRealOk.checked,
           confirm_wheels_off_ground: elRealOk.checked,
         }),
@@ -1096,7 +1104,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
         role: 'assistant',
         kind: 'live-event',
         meta: `${eff.label} · 自动整定启动`,
-        text: `开始整定「${opt.label}」（目标 ${Number(elTarget.value) || opt.target} ${opt.unit} · 最多 ${eff.rounds} 轮 · ${shortModelName()}），每轮 4 ms 阶跃完成后将实时同步结论。`,
+        text: `开始整定「${opt.label}」（目标 ${Number(elTarget.value) || opt.target} ${opt.unit} · 最多 ${eff.rounds} 轮 · ${shortModelName()}${userNote ? ` · 约束：${userNote}` : ''}），每轮 4 ms 阶跃完成后将实时同步波形特征与结论。`,
       });
       renderStatus(data);
       ensurePolling();

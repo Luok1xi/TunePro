@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -358,6 +359,100 @@ class TestAITunerGuardrails(unittest.TestCase):
             tuner.stop(estop=False)
             tuner.session.stop()
             bridge.disconnect()
+
+    def test_v16_waveform_sampler_dynamics_history_and_incremental_pid(self):
+        # 1) Extrema-preserving waveform sampler & dynamics on synthetic underdamped yaw capture
+        rows = []
+        idx = 0
+        for _ in range(15):
+            rows.append({'idx': idx, 'target': 300, 'enc_l': -40, 'enc_r': 40, 'pwm_l': -1200, 'pwm_r': 1200, 'gyro': 300.0, 'set_l': 0, 'set_r': 0, 'phase': 1})
+            idx += 1
+        for k in range(140):
+            # Step from +300 -> -300 with ~18% low-freq overshoot
+            t = k * 0.004
+            g = -300.0 + 600.0 * math.exp(-t / 0.045) * math.cos(t * 28.0)
+            dm = -1100.0 - 400.0 * math.exp(-t / 0.04)
+            rows.append({'idx': idx, 'target': -300, 'enc_l': 40, 'enc_r': -40, 'pwm_l': -dm, 'pwm_r': dm, 'gyro': g, 'set_l': 0, 'set_r': 0, 'phase': 2})
+            idx += 1
+        hdr = {'dt_ms': 4, 'profile': 'yaw-alt', 'side': 4}
+        m = ai_tuner.analyze_capture_rows(hdr, rows, 'yaw_2s1p')
+        wf = ai_tuner.sample_capture_waveform(hdr, rows, 'yaw_2s1p', limit=20)
+        wf_lines = wf.splitlines()
+        self.assertGreaterEqual(len(wf_lines), 12)
+        self.assertLessEqual(len(wf_lines), 30)
+        self.assertIn('t_ms,tgt,act,err,pwm_cm,pwm_dm', wf_lines[1])
+        self.assertIn('dynamics', m)
+        self.assertIsNotNone(m['dynamics']['tau_eff_ms'])
+        self.assertIsNotNone(m['dynamics']['implied_ff_hint'])
+
+        # 2) Acceptance gaps & tiered rollback (never roll back from OVERSHOOTING to OSCILLATING)
+        ok, gaps, detail = ai_tuner.describe_acceptance_gaps(m, 'yaw_2s1p', 'balanced')
+        self.assertFalse(ok)
+        self.assertTrue(any('超调' in g for g in gaps))
+        self.assertIn('超调', detail)
+        osc_m = dict(m, status='OSCILLATING', overshoot_pct=35.0, crossings=9)
+        ov_m = dict(m, status='OVERSHOOTING', overshoot_pct=16.0, crossings=2)
+        self.assertFalse(ai_tuner.should_rollback(ov_m, osc_m, 'yaw_2s1p'))
+        self.assertTrue(ai_tuner.should_rollback(osc_m, dict(m, status='STABLE', overshoot_pct=3.0, crossings=1), 'yaw_2s1p'))
+
+        # 3) History table keeps best and last_rejected even beyond recent window + sensitivity hints
+        hist = [
+            {'round': 1, 'parameters': {'ykp': 6.0, 'yff': 1.0, 'yki': 0.0}, 'metrics': dict(m, status='SLOW_RESPONSE', rise_ms=130.0, overshoot_pct=0.0), 'score': 45.0, 'action': 'BOOST_KP_AND_FF'},
+            {'round': 2, 'parameters': {'ykp': 9.5, 'yff': 1.3, 'yki': 0.0}, 'metrics': dict(m, status='STABLE', rise_ms=52.0, overshoot_pct=3.0), 'score': 12.0, 'action': 'FINE_TUNE'},
+            {'round': 3, 'parameters': {'ykp': 13.0, 'yff': 1.6, 'yki': 0.2}, 'metrics': osc_m, 'score': 88.0, 'action': 'ROLLBACK'},
+        ]
+        tbl = ai_tuner.format_tuning_history_table(hist, best=hist[1], last_rejected=hist[2], max_recent=1)
+        self.assertIn('best|2|', tbl)
+        self.assertIn('last_rejected|3|', tbl)
+        sens = ai_tuner.compute_sensitivity_hints(hist)
+        self.assertTrue(any('R1->R2' in s and '改善' in s for s in sens))
+
+        # 4) Multi-strategy LLM proposal parser (nested, flat, OBSERVE, plain key=val)
+        y_bounds = ai_tuner.get_loop_bounds('yaw_2s1p')
+        p_flat = ai_tuner.parse_llm_proposal_response('{"ykp": 14.2, "yff": 1.9, "yki": 0.05, "status": "TUNING", "analysis_summary": "flat ok"}', y_bounds)
+        self.assertIsNotNone(p_flat)
+        self.assertEqual(p_flat['parameters']['ykp'], 14.2)
+        p_obs = ai_tuner.parse_llm_proposal_response('{"tuning_action": "OBSERVE", "status": "TUNING", "analysis_summary": "hold"}', y_bounds)
+        self.assertEqual(p_obs['tuning_action'], 'OBSERVE')
+        p_txt = ai_tuner.parse_llm_proposal_response('建议调整：ykp=13.5, yff=1.85, yki=0.04 TUNING', y_bounds)
+        self.assertIsNotNone(p_txt)
+        self.assertEqual(p_txt['parameters']['ykp'], 13.5)
+
+        # 5) Incremental PI physics: yaw_3c severely sluggish boosts BOTH ykp AND yki
+        y3_bounds = ai_tuner.get_loop_bounds('yaw_3c')
+        slow_m = {
+            'status': 'SLOW_RESPONSE', 'rise_ms': 220.0, 'overshoot_pct': 0.0,
+            'steady_err_pct': 18.0, 'tail_mae_pct': 19.0, 'crossings': 0, 'pwm_sat_pct': 0.0,
+            'dynamics': {'osc_type': 'none', 'tau_eff_ms': 40.0},
+        }
+        prop_y3 = ai_tuner.build_rule_proposal('yaw_3c', {'ykp': 0.04, 'yki': 0.001}, slow_m, y3_bounds, [], set())
+        self.assertGreater(prop_y3['parameters']['ykp'], 0.04)
+        self.assertGreater(prop_y3['parameters']['yki'], 0.001)
+
+        # 6) Incremental PI physics: low-freq overshoot cuts Ki strongly; high-freq chatter cuts Kp strongly
+        s3_bounds = ai_tuner.get_loop_bounds('speed_3c')
+        lf_m = {
+            'status': 'OVERSHOOTING', 'rise_ms': 45.0, 'overshoot_pct': 22.0,
+            'steady_err_pct': 2.0, 'tail_mae_pct': 4.0, 'crossings': 2, 'pwm_sat_pct': 10.0,
+            'dynamics': {'osc_type': 'low_freq_i_swing', 'tau_eff_ms': 30.0},
+        }
+        hf_m = {
+            'status': 'OSCILLATING', 'rise_ms': 28.0, 'overshoot_pct': 14.0,
+            'steady_err_pct': 1.5, 'tail_mae_pct': 8.0, 'crossings': 8, 'pwm_sat_pct': 40.0,
+            'dynamics': {'osc_type': 'high_freq_p_chatter', 'tau_eff_ms': 24.0},
+        }
+        p_lf = ai_tuner.build_rule_proposal('speed_3c', {'lkp': 14.0, 'lki': 3.0, 'rkp': 14.0, 'rki': 3.0}, lf_m, s3_bounds, [], set())
+        p_hf = ai_tuner.build_rule_proposal('speed_3c', {'lkp': 36.0, 'lki': 1.5, 'rkp': 36.0, 'rki': 1.5}, hf_m, s3_bounds, [], set())
+        # Low-freq overshoot cuts Ki proportionally much harder than Kp
+        self.assertGreater((3.0 - p_lf['parameters']['lki']) / 3.0, (14.0 - p_lf['parameters']['lkp']) / 14.0)
+        # High-freq chatter cuts Kp proportionally harder than Ki
+        self.assertGreater((36.0 - p_hf['parameters']['lkp']) / 36.0, (1.5 - p_hf['parameters']['lki']) / 1.5)
+
+        # 7) speed_3c independent L/R wheel analysis & independent tuning
+        asym_m = dict(lf_m, left=dict(slow_m, osc_type='none', tau_eff_ms=34.0), right=dict(hf_m, osc_type='high_freq_p_chatter', tau_eff_ms=26.0))
+        p_asym = ai_tuner.build_rule_proposal('speed_3c', {'lkp': 10.0, 'lki': 0.5, 'rkp': 34.0, 'rki': 2.0}, asym_m, s3_bounds, [], set())
+        self.assertGreater(p_asym['parameters']['lkp'], 10.0)
+        self.assertLess(p_asym['parameters']['rkp'], 34.0)
 
 
 if __name__ == '__main__':

@@ -193,7 +193,7 @@ class AppHandler(BaseHTTPRequestHandler):
             path = parsed.path
             qs = urllib.parse.parse_qs(parsed.query)
             if path == '/api/health':
-                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.4', 'demo': DEMO_MODE, 'ai_tuner': True, 'ai_chat': True, 'raw_stream': True, 'local_cli': True})
+                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.5', 'demo': DEMO_MODE, 'ai_tuner': True, 'ai_chat': True, 'ai_stream': True, 'raw_stream': True, 'local_cli': True})
             if path == '/api/serial/ports':
                 return self._send_json({
                     'ports': serial_bridge.list_serial_ports(include_demo=True, demo_first=DEMO_MODE),
@@ -235,6 +235,37 @@ class AppHandler(BaseHTTPRequestHandler):
             pass
         except Exception as exc:
             self._send_json({'error': str(exc)[:300]}, 500)
+
+    def _stream_ai_chat(self, body: dict):
+        self.send_response(200)
+        self._headers_common()
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.end_headers()
+
+        write_lock = threading.Lock()
+        closed = False
+
+        def emit_sse(event: str, payload: dict) -> None:
+            nonlocal closed
+            if closed:
+                return
+            msg = f'event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n'.encode('utf-8')
+            with write_lock:
+                if closed:
+                    return
+                try:
+                    self.wfile.write(msg)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                    closed = True
+
+        try:
+            emit_sse('start', {'ok': True})
+            final_res = ai_tuner.AI_TUNER.chat_stream(body, on_delta=lambda ch: emit_sse('delta', {'t': ch}))
+            emit_sse('done', final_res)
+        except Exception as exc:
+            emit_sse('error', {'error': str(exc)[:260]})
 
     def do_POST(self):
         try:
@@ -293,6 +324,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 ))
             if path == '/api/ai/chat':
                 return self._send_json(ai_tuner.AI_TUNER.chat(body))
+            if path == '/api/ai/chat-stream':
+                return self._stream_ai_chat(body)
+            if path == '/api/ai/warmup':
+                return self._send_json(ai_tuner.AI_TUNER.warmup(body))
             if path == '/api/app/shutdown':
                 SHUTDOWN_EV.set()
                 threading.Timer(0.15, self.server.shutdown).start()
@@ -408,7 +443,7 @@ def main():
         pass
     finally:
         SHUTDOWN_EV.set()
-        ai_tuner.AI_TUNER.stop(estop=True)
+        ai_tuner.AI_TUNER.shutdown()
         serial_bridge.BRIDGE.disconnect()
         httpd.server_close()
 

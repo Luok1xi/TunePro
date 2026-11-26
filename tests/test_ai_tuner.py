@@ -315,6 +315,50 @@ class TestAITunerGuardrails(unittest.TestCase):
         sess._feed_bytes(b'\xa5\x5b\x01\x01\x00\x01\x10\x00\x80\xff\x00\xfe' + wa1_raw)
         self.assertEqual(sess._last_ack, ('WA1', ['2', '8', 'ykp', '165000']))
 
+    def test_warm_cli_model_tiering_and_stream_params_filter(self):
+        self.assertEqual(ai_tuner.resolve_local_cli_model('agy', '', 'fast'), 'gemini-3.8-flash-low')
+        self.assertEqual(ai_tuner.resolve_local_cli_model('agy', '', 'medium'), 'gemini-3.8-flash-medium')
+        self.assertEqual(ai_tuner.resolve_local_cli_model('agy', '', 'max'), 'gemini-4-neon-high')
+        self.assertEqual(ai_tuner.resolve_local_cli_model('agy', 'custom-model', 'fast'), 'custom-model')
+        self.assertEqual(ai_tuner.resolve_local_cli_model('claude', '', 'low'), 'haiku')
+
+        # Stream filter suppresses <<<PARAMS>>> even when split across tiny chunks
+        emitted: list[str] = []
+        filt = ai_tuner._StreamParamsFilter(emitted.append)
+        full = '建议先降一点 ykp 压低超调。\n<<<PARAMS>>>\n{"ykp": 16.0}\n<<<END>>>'
+        for i in range(0, len(full), 3):
+            filt.feed(full[i:i + 3])
+        filt.flush()
+        streamed_txt = ''.join(emitted)
+        self.assertIn('建议先降一点 ykp', streamed_txt)
+        self.assertNotIn('<<<', streamed_txt)
+        self.assertNotIn('PARAMS', streamed_txt)
+
+        prose, ins, params = ai_tuner.split_prose_and_params(full)
+        self.assertEqual(prose, '建议先降一点 ykp 压低超调。')
+        self.assertEqual(params, {'ykp': 16.0})
+        self.assertEqual(ins, [])
+
+        # Legacy JSON reply fallback unwraps cleanly without raw braces
+        prose2, ins2, params2 = ai_tuner.split_prose_and_params('{"reply": "先降 Kp", "insights": ["超调偏高"], "suggested_params": {"ykp": 15.5}}')
+        self.assertEqual(prose2, '先降 Kp')
+        self.assertEqual(ins2, ['超调偏高'])
+        self.assertEqual(params2, {'ykp': 15.5})
+
+        # chat_stream offline rule engine emits live deltas and elapsed_ms
+        bridge = serial_bridge.SerialBridge(serial_factory=serial_bridge.open_serial_port)
+        tuner = ai_tuner.AITunerManager(bridge)
+        try:
+            deltas: list[str] = []
+            res = tuner.chat_stream({'message': '超调偏大怎么调？', 'loop': 'yaw_2s1p', 'provider': 'rule'}, on_delta=deltas.append)
+            self.assertTrue(res['ok'])
+            self.assertGreaterEqual(len(deltas), 1)
+            self.assertIn('elapsed_ms', res)
+        finally:
+            tuner.stop(estop=False)
+            tuner.session.stop()
+            bridge.disconnect()
+
 
 if __name__ == '__main__':
     unittest.main()

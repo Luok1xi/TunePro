@@ -17,6 +17,7 @@ THIRD_PARTY_NOTICES.md).
 """
 from __future__ import annotations
 
+import atexit
 import base64
 from copy import deepcopy
 import json
@@ -299,6 +300,445 @@ def detect_local_clis() -> list[dict[str, Any]]:
     return out
 
 
+_AGY_EFFORT_MODELS: dict[str, str] = {
+    'fast': 'gemini-3.8-flash-low',
+    'low': 'gemini-3.8-flash-low',
+    'medium': 'gemini-3.8-flash-medium',
+    'high': 'gemini-3.8-flash-high',
+    'max': 'gemini-4-neon-high',
+}
+_CLAUDE_EFFORT_MODELS: dict[str, str] = {
+    'fast': 'haiku',
+    'low': 'haiku',
+    'medium': 'sonnet',
+    'high': 'sonnet',
+    'max': '',
+}
+
+
+def resolve_local_cli_model(tool_id: str, explicit_model: str, effort_key: str) -> str:
+    """Pick an ultra-fast effort-matched model when the user leaves Model blank."""
+    m = str(explicit_model or '').strip()
+    if m:
+        return m
+    eff = normalize_effort(effort_key)
+    if tool_id == 'agy':
+        return _AGY_EFFORT_MODELS.get(eff, 'gemini-3.8-flash-medium')
+    if tool_id == 'claude':
+        return _CLAUDE_EFFORT_MODELS.get(eff, 'sonnet')
+    return ''
+
+
+class _WarmCLIWorker:
+    """Single persistent stream-json CLI subprocess kept warm in an empty sandbox cwd."""
+
+    def __init__(self, tool_id: str, exe: str, model: str, explicit_model: bool, effort_key: str):
+        self.tool_id = tool_id
+        self.exe = exe
+        self.model = model
+        self.explicit_model = explicit_model
+        self.effort_key = effort_key
+        self.key = (tool_id, exe, model, effort_key if (tool_id == 'claude' or explicit_model) else '')
+        self.sandbox_dir = tempfile.mkdtemp(prefix='tunepro_cli_')
+        self.proc: subprocess.Popen[str] | None = None
+        self._out_q: queue.Queue[str | None] = queue.Queue()
+        self._stderr_lines: list[str] = []
+        self._ready_ev = threading.Event()
+        self._turn_lock = threading.Lock()
+        self.turns = 0
+        self.last_used = time.monotonic()
+        self.closed = False
+        self._start()
+
+    def _start(self) -> None:
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        env = dict(os.environ)
+        env.setdefault('NO_COLOR', '1')
+        effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}
+
+        if self.tool_id == 'agy':
+            cmd = [
+                self.exe,
+                '--input-format', 'stream-json',
+                '--output-format', 'stream-json',
+                '--disable-slash-commands',
+            ]
+            if self.model:
+                cmd.extend(['--model', self.model])
+            if self.explicit_model:
+                cmd.extend(['--effort', effort_map[self.effort_key]])
+        elif self.tool_id == 'claude':
+            cmd = [
+                self.exe, '-p',
+                '--input-format', 'stream-json',
+                '--output-format', 'stream-json',
+                '--verbose',
+                '--include-partial-messages',
+                '--no-session-persistence',
+                '--strict-mcp-config',
+                '--tools', '',
+                '--effort', effort_map[self.effort_key],
+            ]
+            if self.model:
+                cmd.extend(['--model', self.model])
+        else:
+            raise ValueError(f'Unsupported persistent worker tool: {self.tool_id}')
+
+        self.proc = subprocess.Popen(
+            cmd,
+            cwd=self.sandbox_dir,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            bufsize=1,
+            creationflags=creationflags,
+            env=env,
+        )
+        threading.Thread(target=self._read_stdout, name=f'cli-out-{self.tool_id}', daemon=True).start()
+        threading.Thread(target=self._read_stderr, name=f'cli-err-{self.tool_id}', daemon=True).start()
+        if self.tool_id == 'claude':
+            self._ready_ev.set()
+
+    def _read_stdout(self) -> None:
+        proc = self.proc
+        if not proc or not proc.stdout:
+            self._ready_ev.set()
+            self._out_q.put(None)
+            return
+        try:
+            for raw in proc.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+                if not self._ready_ev.is_set() and '"event":"init"' in line.replace(' ', ''):
+                    self._ready_ev.set()
+                    continue
+                self._out_q.put(line)
+        except Exception:
+            pass
+        finally:
+            self._ready_ev.set()
+            self._out_q.put(None)
+
+    def _read_stderr(self) -> None:
+        proc = self.proc
+        if not proc or not proc.stderr:
+            return
+        try:
+            for raw in proc.stderr:
+                s = raw.strip()
+                if s:
+                    self._stderr_lines.append(s)
+                    if len(self._stderr_lines) > 20:
+                        del self._stderr_lines[:-20]
+        except Exception:
+            pass
+
+    def is_alive(self) -> bool:
+        return (
+            not self.closed
+            and self.proc is not None
+            and self.proc.poll() is None
+            and self.turns < 16
+            and (time.monotonic() - self.last_used) < 600.0
+        )
+
+    def wait_ready(self, timeout_s: float = 18.0) -> bool:
+        return self._ready_ev.wait(timeout_s) and self.is_alive()
+
+    def ask(
+        self,
+        prompt: str,
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        timeout_s: float = 75.0,
+    ) -> str:
+        with self._turn_lock:
+            if not self._ready_ev.wait(min(20.0, timeout_s)):
+                self.close()
+                raise TimeoutError(f'{self.tool_id} 预热启动超时')
+            if not self.is_alive() or not self.proc or not self.proc.stdin:
+                err = ' '.join(self._stderr_lines[-3:])[:200]
+                self.close()
+                raise RuntimeError(f'{self.tool_id} 进程已退出：{err or "请重试"}')
+
+            # Drain any stale lines from prior aborted turn
+            while True:
+                try:
+                    if self._out_q.get_nowait() is None:
+                        self.close()
+                        raise RuntimeError(f'{self.tool_id} 通道已关闭')
+                except queue.Empty:
+                    break
+
+            if self.tool_id == 'agy':
+                payload = {'event': 'user', 'message': {'content': prompt}}
+            else:
+                payload = {'type': 'user', 'message': {'role': 'user', 'content': prompt}}
+
+            try:
+                self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + '\n')
+                self.proc.stdin.flush()
+            except OSError as exc:
+                self.close()
+                raise RuntimeError(f'{self.tool_id} 写入失败：{exc}') from exc
+
+            self.last_used = time.monotonic()
+            deadline = self.last_used + timeout_s
+            chunks: list[str] = []
+            final_text = ''
+            got_result = False
+
+            while time.monotonic() < deadline:
+                rem = max(0.05, deadline - time.monotonic())
+                try:
+                    line = self._out_q.get(timeout=min(0.5, rem))
+                except queue.Empty:
+                    if self.proc.poll() is not None:
+                        break
+                    continue
+                if line is None:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if self.tool_id == 'agy':
+                    ev = obj.get('event')
+                    if ev == 'step_update':
+                        st = obj.get('step_update') or {}
+                        delta = st.get('text_delta')
+                        if isinstance(delta, str) and delta:
+                            chunks.append(delta)
+                            if on_delta:
+                                on_delta(delta)
+                    elif ev == 'result':
+                        res = obj.get('result') or obj
+                        status = str(res.get('status') or '').upper()
+                        if status == 'ERROR' or res.get('error'):
+                            err_msg = str(res.get('error') or '未知错误')[:220]
+                            if 'auth' in err_msg.lower() or 'login' in err_msg.lower():
+                                raise RuntimeError('Antigravity (agy) 尚未完成 CLI 授权：请先在终端运行一次 agy 完成账号登录。')
+                            raise RuntimeError(f'Antigravity CLI 返回错误：{err_msg}')
+                        final_text = str(res.get('response') or '').strip()
+                        got_result = True
+                        break
+                else:
+                    ev_type = obj.get('type')
+                    if ev_type == 'stream_event':
+                        sev = obj.get('event') or {}
+                        if sev.get('type') == 'content_block_delta':
+                            d = sev.get('delta') or {}
+                            if d.get('type') == 'text_delta' and isinstance(d.get('text'), str) and d['text']:
+                                chunks.append(d['text'])
+                                if on_delta:
+                                    on_delta(d['text'])
+                    elif ev_type == 'result':
+                        if obj.get('is_error'):
+                            err_msg = str(obj.get('result') or '未知错误')[:220]
+                            if 'login' in err_msg.lower() or 'auth' in err_msg.lower():
+                                raise RuntimeError('Claude Code 尚未登录：请先在终端运行 claude 并完成 /login。')
+                            raise RuntimeError(f'Claude Code 返回错误：{err_msg}')
+                        final_text = str(obj.get('result') or '').strip()
+                        got_result = True
+                        break
+
+            if not got_result:
+                err = ' '.join(self._stderr_lines[-3:])[:220]
+                self.close()
+                if 'auth' in err.lower() or 'login' in err.lower():
+                    raise RuntimeError(f'{self.tool_id} 尚未完成官方 CLI 登录：{err}')
+                raise TimeoutError(f'{self.tool_id} 等待回复超时（{int(timeout_s)}s）' if not err else f'{self.tool_id} 异常中止：{err}')
+
+            self.turns += 1
+            self.last_used = time.monotonic()
+            joined = ''.join(chunks).strip()
+            if final_text and not joined and on_delta:
+                on_delta(final_text)
+            return final_text or joined
+
+    def close(self) -> None:
+        self.closed = True
+        proc = self.proc
+        self.proc = None
+        if proc is not None:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        try:
+            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+class LocalCLISessionPool:
+    """Maintains a single pre-warmed persistent CLI worker to eliminate cold-start lag."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._worker: _WarmCLIWorker | None = None
+
+    def _resolve_target(self, cli_tool: str, model: str, reasoning_effort: str) -> tuple[str, str, str, bool, str]:
+        eff_key = normalize_effort(reasoning_effort)
+        detected = detect_local_clis()
+        avail = {item['id']: item for item in detected if item['available']}
+        wanted = str(cli_tool or 'auto').strip().lower()
+        if wanted in ('', 'auto'):
+            chosen_id = next((t for t in ('agy', 'claude', 'codex', 'gemini') if t in avail), '')
+        elif wanted in avail:
+            chosen_id = wanted
+        else:
+            chosen_id = ''
+        if not chosen_id:
+            raise RuntimeError('未检测到可用的本机官方 AI CLI（请确认已安装并登录 agy / claude / codex / gemini）。')
+        explicit_m = str(model or '').strip()
+        resolved_m = resolve_local_cli_model(chosen_id, explicit_m, eff_key)
+        return chosen_id, avail[chosen_id]['path'], resolved_m, bool(explicit_m), eff_key
+
+    def _get_or_spawn(self, tool_id: str, exe: str, model: str, explicit_model: bool, effort_key: str) -> _WarmCLIWorker:
+        want_key = (tool_id, exe, model, effort_key if (tool_id == 'claude' or explicit_model) else '')
+        with self._lock:
+            if self._worker is not None and self._worker.key == want_key and self._worker.is_alive():
+                return self._worker
+            old = self._worker
+            self._worker = None
+        if old is not None:
+            old.close()
+        worker = _WarmCLIWorker(tool_id, exe, model, explicit_model, effort_key)
+        with self._lock:
+            if self._worker is not None and self._worker is not worker:
+                old2 = self._worker
+                self._worker = worker
+                threading.Thread(target=old2.close, daemon=True).start()
+            else:
+                self._worker = worker
+        return worker
+
+    def warmup(self, cli_tool: str = 'auto', model: str = '', reasoning_effort: str = 'medium') -> dict[str, Any]:
+        try:
+            tool_id, exe, resolved_m, explicit_m, eff_key = self._resolve_target(cli_tool, model, reasoning_effort)
+        except Exception as exc:
+            return {'ok': False, 'warming': False, 'error': str(exc)}
+        if tool_id not in ('agy', 'claude'):
+            return {'ok': True, 'warming': False, 'tool': tool_id, 'model': resolved_m or '官方默认'}
+
+        def _bg() -> None:
+            try:
+                w = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key)
+                w.wait_ready(18.0)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg, name='cli-warmup', daemon=True).start()
+        return {'ok': True, 'warming': True, 'tool': tool_id, 'model': resolved_m or '官方默认'}
+
+    def ask_stream(
+        self,
+        *,
+        cli_tool: str,
+        model: str,
+        reasoning_effort: str,
+        system_prompt: str,
+        user_prompt: str,
+        on_delta: Callable[[str], None] | None = None,
+        timeout_s: float = 75.0,
+    ) -> tuple[str, str]:
+        tool_id, exe, resolved_m, explicit_m, eff_key = self._resolve_target(cli_tool, model, reasoning_effort)
+        label_map = {'agy': 'Antigravity', 'claude': 'Claude Code', 'codex': 'Codex', 'gemini': 'Gemini CLI'}
+        display_model = f'{label_map.get(tool_id, tool_id)} ({resolved_m or "官方默认"})'
+
+        if tool_id in ('agy', 'claude'):
+            worker = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key)
+            # Only attach full system_prompt on first turn of a warm worker (reuses KV cache on turn 2+!)
+            prompt = f'{system_prompt}\n\n{user_prompt}' if worker.turns == 0 else user_prompt
+            try:
+                text = worker.ask(prompt, on_delta=on_delta, timeout_s=timeout_s)
+                return text, display_model
+            except RuntimeError as first_err:
+                if '登录' in str(first_err) or '授权' in str(first_err):
+                    raise
+                # Single clean respawn retry if cached worker died between turns
+                if not worker.is_alive():
+                    worker = self._get_or_spawn(tool_id, exe, resolved_m, explicit_m, eff_key)
+                    text = worker.ask(f'{system_prompt}\n\n{user_prompt}', on_delta=on_delta, timeout_s=timeout_s)
+                    return text, display_model
+                raise
+
+        # Non-persistent fallback for codex / gemini (still runs in an isolated empty cwd to avoid repo indexing!)
+        full_prompt = f'{system_prompt}\n\n{user_prompt}'
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        env = dict(os.environ)
+        env.setdefault('NO_COLOR', '1')
+        with tempfile.TemporaryDirectory(prefix='tunepro_cli_once_', ignore_cleanup_errors=True) as empty_cwd:
+            if tool_id == 'codex':
+                effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'xhigh'}
+                tmp_path = str(Path(empty_cwd) / 'out.txt')
+                cmd = [
+                    exe, 'exec',
+                    '--ephemeral',
+                    '--skip-git-repo-check',
+                    '--sandbox', 'read-only',
+                    '--color', 'never',
+                    '-o', tmp_path,
+                    '-c', f'model_reasoning_effort="{effort_map[eff_key]}"',
+                ]
+                if resolved_m:
+                    cmd.extend(['-m', resolved_m])
+                cmd.append('-')
+                proc = subprocess.run(
+                    cmd, cwd=empty_cwd, input=full_prompt, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=timeout_s,
+                    creationflags=creationflags, env=env,
+                )
+                out_txt = Path(tmp_path).read_text(encoding='utf-8', errors='replace').strip() if Path(tmp_path).is_file() else ''
+                if proc.returncode != 0 and not out_txt:
+                    err = (proc.stderr or proc.stdout or '').strip()[:180]
+                    raise RuntimeError(f'Codex CLI 返回错误 ({proc.returncode})：{err}')
+                text = out_txt or (proc.stdout or '').strip()
+            else:
+                cmd = [exe, '-p', '']
+                if resolved_m:
+                    cmd.extend(['-m', resolved_m])
+                proc = subprocess.run(
+                    cmd, cwd=empty_cwd, input=full_prompt, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=timeout_s,
+                    creationflags=creationflags, env=env,
+                )
+                if proc.returncode != 0:
+                    err = (proc.stderr or proc.stdout or '').strip()[:180]
+                    raise RuntimeError(f'Gemini CLI 返回错误 ({proc.returncode})：{err}')
+                text = (proc.stdout or '').strip()
+        if on_delta and text:
+            on_delta(text)
+        return text, display_model
+
+    def close_all(self) -> None:
+        with self._lock:
+            w = self._worker
+            self._worker = None
+        if w is not None:
+            w.close()
+
+
+LOCAL_CLI_POOL = LocalCLISessionPool()
+atexit.register(LOCAL_CLI_POOL.close_all)
+
+
 def call_local_cli_text(
     *,
     cli_tool: str,
@@ -306,124 +746,19 @@ def call_local_cli_text(
     reasoning_effort: str,
     system_prompt: str,
     user_prompt: str,
-    timeout_s: float = 90.0,
+    on_delta: Callable[[str], None] | None = None,
+    timeout_s: float = 75.0,
 ) -> tuple[str, str]:
-    """Invoke a locally installed, officially authenticated AI CLI non-interactively."""
-    eff_key = normalize_effort(reasoning_effort)
-    detected = detect_local_clis()
-    avail = {item['id']: item for item in detected if item['available']}
-
-    wanted = str(cli_tool or 'auto').strip().lower()
-    if wanted in ('', 'auto'):
-        chosen_id = next((t for t in ('agy', 'claude', 'codex', 'gemini') if t in avail), '')
-    elif wanted in avail:
-        chosen_id = wanted
-    else:
-        chosen_id = ''
-
-    if not chosen_id:
-        raise RuntimeError('未检测到可用的本机官方 AI CLI（请确认已安装并登录 claude / codex / agy / gemini）。')
-
-    exe = avail[chosen_id]['path']
-    full_prompt = f'{system_prompt}\n\n{user_prompt}'
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-    env = dict(os.environ)
-    env.setdefault('NO_COLOR', '1')
-
-    def _run_cmd(cmd: list[str], stdin_text: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            cmd,
-            input=stdin_text,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=timeout_s,
-            creationflags=creationflags,
-            env=env,
-        )
-
-    if chosen_id == 'claude':
-        effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}
-        cmd = [
-            exe, '-p',
-            '--output-format', 'text',
-            '--no-session-persistence',
-            '--tools', '',
-            '--effort', effort_map[eff_key],
-        ]
-        if model:
-            cmd.extend(['--model', model])
-        proc = _run_cmd(cmd, full_prompt)
-        if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or '').strip()[:180]
-            raise RuntimeError(f'Claude Code 返回错误 ({proc.returncode})：{err}')
-        text = (proc.stdout or '').strip()
-        return text, f'Claude Code ({model or "官方默认"})'
-
-    if chosen_id == 'codex':
-        effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'xhigh'}
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(prefix='tunepro_codex_', suffix='.txt', delete=False) as tf:
-                tmp_path = tf.name
-            cmd = [
-                exe, 'exec',
-                '--ephemeral',
-                '--skip-git-repo-check',
-                '--sandbox', 'read-only',
-                '--color', 'never',
-                '-o', tmp_path,
-                '-c', f'model_reasoning_effort="{effort_map[eff_key]}"',
-            ]
-            if model:
-                cmd.extend(['-m', model])
-            cmd.append('-')
-            proc = _run_cmd(cmd, full_prompt)
-            out_txt = ''
-            if tmp_path and Path(tmp_path).is_file():
-                out_txt = Path(tmp_path).read_text(encoding='utf-8', errors='replace').strip()
-            if proc.returncode != 0 and not out_txt:
-                err = (proc.stderr or proc.stdout or '').strip()[:180]
-                raise RuntimeError(f'Codex CLI 返回错误 ({proc.returncode})：{err}')
-            text = out_txt or (proc.stdout or '').strip()
-            return text, f'Codex ({model or "官方默认"})'
-        finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-    if chosen_id == 'agy':
-        effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}
-        cmd = [
-            exe,
-            '-p', full_prompt,
-            '--output-format', 'text',
-            '--disable-slash-commands',
-            '--effort', effort_map[eff_key],
-            '--print-timeout', f'{max(15, int(timeout_s))}s',
-        ]
-        if model:
-            cmd.extend(['--model', model])
-        proc = _run_cmd(cmd, '')
-        if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or '').strip()[:220]
-            if 'auth' in err.lower() or 'login' in err.lower():
-                raise RuntimeError('Antigravity (agy) 尚未完成 CLI 授权：请先在终端运行一次 agy 完成账号登录后再试。')
-            raise RuntimeError(f'Antigravity CLI 返回错误 ({proc.returncode})：{err}')
-        return (proc.stdout or '').strip(), f'Antigravity ({model or "官方默认"})'
-
-    # gemini CLI
-    cmd = [exe, '-p', '']
-    if model:
-        cmd.extend(['-m', model])
-    proc = _run_cmd(cmd, full_prompt)
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or '').strip()[:180]
-        raise RuntimeError(f'Gemini CLI 返回错误 ({proc.returncode})：{err}')
-    return (proc.stdout or '').strip(), f'Gemini CLI ({model or "官方默认"})'
+    """Invoke a locally installed, officially authenticated AI CLI via warm persistent session pool."""
+    return LOCAL_CLI_POOL.ask_stream(
+        cli_tool=cli_tool,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        on_delta=on_delta,
+        timeout_s=timeout_s,
+    )
 
 
 def _finite_float(val: Any, name: str) -> float:
@@ -1413,6 +1748,280 @@ def _build_offline_chat_reply(
         'suggested_params': suggested,
         'guardrail_notes': notes,
         'loop': loop_id,
+    }
+
+
+_PARAMS_TAG = '<<<PARAMS>>>'
+_PARAMS_BLOCK_RE = re.compile(r'<<<PARAMS>>>\s*(.*?)\s*(?:<<<END>>>|$)', re.DOTALL)
+
+
+def split_prose_and_params(raw_text: str) -> tuple[str, list[str], dict[str, Any] | None]:
+    """Separate clean human prose from optional <<<PARAMS>>> JSON block or legacy JSON reply."""
+    text = str(raw_text or '').strip()
+    if not text:
+        return '模型未返回有效文本。', [], None
+
+    m = _PARAMS_BLOCK_RE.search(text)
+    if m:
+        prose = (text[:m.start()] + text[m.end():]).strip()
+        block_obj = extract_json_object(m.group(1))
+        if isinstance(block_obj, dict):
+            params = block_obj.get('parameters') if isinstance(block_obj.get('parameters'), dict) else block_obj
+            if isinstance(params, dict):
+                return prose or '已生成参数建议，可直接点击下方卡片安全写入。', [], params
+        return prose or text, [], None
+
+    # Fallback if an external model wrapped the entire answer in a JSON object
+    if text.startswith('{') or text.startswith('```json'):
+        obj = extract_json_object(text)
+        if obj and isinstance(obj.get('reply'), str):
+            raw_ins = obj.get('insights') if isinstance(obj.get('insights'), list) else []
+            insights = [str(x).strip()[:200] for x in raw_ins if str(x).strip()][:4]
+            raw_prop = obj.get('suggested_params') if isinstance(obj.get('suggested_params'), dict) else None
+            return obj['reply'].strip(), insights, raw_prop
+
+    return text, [], None
+
+
+class _StreamParamsFilter:
+    """Forwards live prose deltas immediately while suppressing <<<PARAMS>>>...<<<END>>>."""
+
+    def __init__(self, emit: Callable[[str], None] | None):
+        self._emit = emit
+        self._buf = ''
+        self._suppress = False
+
+    def feed(self, chunk: str) -> None:
+        if not chunk or self._suppress or not self._emit:
+            return
+        self._buf += chunk
+        idx = self._buf.find(_PARAMS_TAG)
+        if idx >= 0:
+            head = self._buf[:idx].rstrip()
+            if head:
+                self._emit(head)
+            self._buf = ''
+            self._suppress = True
+            return
+        # Hold back only a short tail if it could be a partial prefix of '<<<PARAMS>>>'
+        keep = 0
+        max_k = min(len(_PARAMS_TAG) - 1, len(self._buf))
+        for k in range(max_k, 0, -1):
+            if _PARAMS_TAG.startswith(self._buf[-k:]):
+                keep = k
+                break
+        safe = self._buf[:-keep] if keep else self._buf
+        self._buf = self._buf[-keep:] if keep else ''
+        if safe:
+            self._emit(safe)
+
+    def flush(self) -> None:
+        if not self._suppress and self._buf and self._emit:
+            self._emit(self._buf)
+        self._buf = ''
+
+
+def _compact_chat_context(
+    *,
+    loop_id: str,
+    gp1: dict[str, Any] | None,
+    vbat_mv: int | None,
+    live: dict[str, Any],
+    tune_history: list[dict[str, Any]],
+    best: dict[str, Any] | None,
+    bounds: dict[str, dict[str, float]],
+    dry_mode: bool,
+) -> dict[str, Any]:
+    profile = LOOP_PROFILES[loop_id]
+    cur = extract_params_for_loop(gp1, loop_id) if gp1 else None
+    compact_bounds = {k: [v['min'], v['max'], v['max_step']] for k, v in bounds.items()}
+    ctx: dict[str, Any] = {
+        'loop': f'{loop_id} ({profile["label"]})',
+        'dry': dry_mode,
+        'cur': cur,
+        'bounds_min_max_step': compact_bounds,
+    }
+    if vbat_mv and vbat_mv >= VBAT_USB_MV:
+        ctx['vbat_v'] = round(vbat_mv / 1000.0, 2)
+    if live:
+        ctx['live'] = live
+    if tune_history:
+        ctx['recent'] = [
+            {'r': r.get('round'), 'p': r.get('parameters'), 'm': r.get('metrics'), 's': r.get('score')}
+            for r in tune_history[-2:]
+        ]
+    if best:
+        ctx['best'] = {'r': best.get('round'), 'p': best.get('parameters'), 's': best.get('score')}
+    return ctx
+
+
+def call_llm_chat_stream(
+    *,
+    provider: str,
+    base_url: str,
+    model: str,
+    api_key: str,
+    reasoning_effort: str,
+    message: str,
+    chat_history: list[dict[str, str]],
+    loop_id: str,
+    gp1: dict[str, Any] | None,
+    vbat_mv: int | None,
+    live: dict[str, Any],
+    tune_history: list[dict[str, Any]],
+    best: dict[str, Any] | None,
+    bounds: dict[str, dict[str, float]],
+    dry_mode: bool,
+    cli_tool: str = 'auto',
+    on_delta: Callable[[str], None] | None = None,
+    timeout_s: float = 35.0,
+) -> dict[str, Any]:
+    """Streaming prose-first conversational copilot (local warm CLI / OpenAI / Ollama / Anthropic)."""
+    t0 = time.perf_counter()
+    eff_key = normalize_effort(reasoning_effort)
+    eff_cfg = REASONING_LEVELS[eff_key]
+    cur = extract_params_for_loop(gp1, loop_id) if gp1 else None
+    ctx = _compact_chat_context(
+        loop_id=loop_id, gp1=gp1, vbat_mv=vbat_mv, live=live,
+        tune_history=tune_history, best=best, bounds=bounds, dry_mode=dry_mode,
+    )
+
+    system_prompt = (
+        '你是 TC264 智能车调参工作台（TunePro）里的控制工程搭档，用户正看着实时波形和摄像头画面和你交流。\n'
+        f'推理深度：{eff_cfg["label"]} — {eff_cfg["depth"]}\n'
+        '输出规范：\n'
+        '1. 直接用简洁自然的简体中文回复（2~4 句或短要点，不要套话，不要把整段包在 JSON 里），可用少量清晰 Markdown（如 **加粗**、`参数名=值`、短列表）。\n'
+        '2. 仅当你给出明确改参建议时，在全文最末尾追加一行参数块（只能包含当前环路 bounds 里的键与数值）：\n'
+        '<<<PARAMS>>>\n{"参数键": 数值}\n<<<END>>>'
+    )
+    user_block = f'【实时上下文】{json.dumps(ctx, ensure_ascii=False, separators=(",", ":"))}\n【用户】{message}'
+
+    msgs: list[dict[str, str]] = []
+    for item in (chat_history or [])[-4:]:
+        role = 'assistant' if item.get('role') == 'assistant' else 'user'
+        txt = str(item.get('text') or '').strip()[:360]
+        if txt:
+            msgs.append({'role': role, 'content': txt})
+    msgs.append({'role': 'user', 'content': user_block})
+
+    filt = _StreamParamsFilter(on_delta)
+    prov = provider.strip().lower()
+
+    if prov == 'local_cli':
+        text, used_model = call_local_cli_text(
+            cli_tool=cli_tool,
+            model=model,
+            reasoning_effort=eff_key,
+            system_prompt=system_prompt,
+            user_prompt=user_block,
+            on_delta=filt.feed,
+            timeout_s=max(timeout_s, 75.0),
+        )
+        filt.flush()
+    else:
+        url = base_url.strip().rstrip('/')
+        headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.5'}
+        if prov == 'anthropic':
+            endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
+            headers['x-api-key'] = api_key
+            headers['anthropic-version'] = '2023-06-01'
+            used_model = model or 'claude-3-5-sonnet-latest'
+            body: dict[str, Any] = {
+                'model': used_model,
+                'max_tokens': eff_cfg['max_tokens'],
+                'temperature': eff_cfg['temp'],
+                'system': system_prompt,
+                'messages': msgs,
+                'stream': True,
+            }
+        else:
+            if prov == 'ollama' and not url:
+                url = 'http://127.0.0.1:11434/v1'
+            if not url:
+                url = 'https://api.openai.com/v1'
+            endpoint = url if url.endswith('/chat/completions') else f'{url}/chat/completions'
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+            used_model = model or ('qwen2.5:7b' if prov == 'ollama' else 'gpt-4o-mini')
+            body = {
+                'model': used_model,
+                'temperature': eff_cfg['temp'],
+                'max_tokens': eff_cfg['max_tokens'],
+                'messages': [{'role': 'system', 'content': system_prompt}, *msgs],
+                'stream': True,
+            }
+            low_m = used_model.lower()
+            if prov == 'openai' and any(tok in low_m for tok in ('o1', 'o3', 'o4', 'gpt-5', 'gpt-6', 'reasoner')):
+                body['reasoning_effort'] = 'high' if eff_key == 'max' else ('low' if eff_key == 'fast' else eff_key)
+
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
+            headers=headers,
+            method='POST',
+        )
+        pieces: list[str] = []
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            ctype = (resp.headers.get('Content-Type') or '').lower()
+            if 'event-stream' in ctype:
+                for raw_line in resp:
+                    line = raw_line.decode('utf-8', errors='replace').strip()
+                    if not line.startswith('data:'):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str or data_str == '[DONE]':
+                        continue
+                    try:
+                        ev = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = ''
+                    if prov == 'anthropic':
+                        if ev.get('type') == 'content_block_delta':
+                            d = ev.get('delta') or {}
+                            if d.get('type') == 'text_delta':
+                                delta = str(d.get('text') or '')
+                    else:
+                        ch = (ev.get('choices') or [{}])[0]
+                        delta = str(((ch.get('delta') or {}).get('content')) or '')
+                    if delta:
+                        pieces.append(delta)
+                        filt.feed(delta)
+                filt.flush()
+                text = ''.join(pieces)
+            else:
+                parsed = json.loads(resp.read().decode('utf-8', errors='replace'))
+                if prov == 'anthropic':
+                    blocks = parsed.get('content', [])
+                    text = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
+                else:
+                    choices = parsed.get('choices') or []
+                    msg_obj = choices[0].get('message', {}) if choices else {}
+                    text = str(msg_obj.get('content') or '')
+                if text:
+                    filt.feed(text)
+                    filt.flush()
+
+    reply_txt, insights, raw_prop = split_prose_and_params(text)
+    suggested = None
+    notes: list[str] = []
+    if raw_prop and cur:
+        try:
+            suggested, notes = check_and_clamp_proposal(cur, raw_prop, bounds, strict=False)
+        except Exception:
+            suggested = None
+
+    return {
+        'ok': True,
+        'provider': prov,
+        'model': used_model,
+        'effort': eff_key,
+        'reply': reply_txt,
+        'insights': insights,
+        'suggested_params': suggested,
+        'guardrail_notes': notes,
+        'loop': loop_id,
+        'elapsed_ms': int((time.perf_counter() - t0) * 1000),
     }
 
 
@@ -2551,6 +3160,106 @@ class AITunerManager:
             fallback['fallback_used'] = True
             fallback['insights'] = [f'外部模型未响应（{str(exc)[:72]}），已自动切内置诊断引擎回复。', *fallback['insights']]
             return fallback
+
+    def warmup(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        provider = str(cfg.get('provider') or 'local_cli').strip().lower()
+        if provider != 'local_cli':
+            return {'ok': True, 'warming': False}
+        return LOCAL_CLI_POOL.warmup(
+            cli_tool=str(cfg.get('cli_tool') or 'auto').strip().lower(),
+            model=str(cfg.get('model') or '').strip(),
+            reasoning_effort=normalize_effort(cfg.get('reasoning_effort')),
+        )
+
+    def chat_stream(self, cfg: dict[str, Any], on_delta: Callable[[str], None] | None = None) -> dict[str, Any]:
+        t0 = time.perf_counter()
+        message = str(cfg.get('message') or '').strip()
+        if not message:
+            raise ValueError('请输入要和 AI 讨论的内容。')
+        loop_id = str(cfg.get('loop') or self._state.get('loop') or 'yaw_2s1p')
+        if loop_id not in LOOP_PROFILES:
+            loop_id = 'yaw_2s1p'
+        provider = str(cfg.get('provider') or 'rule').strip().lower()
+        if provider not in ('rule', 'local_cli', 'openai', 'ollama', 'anthropic'):
+            provider = 'rule'
+        cli_tool = str(cfg.get('cli_tool') or 'auto').strip().lower()
+        effort = normalize_effort(cfg.get('reasoning_effort'))
+        dry_mode = bool(cfg.get('dry_mode', False))
+        bounds = get_loop_bounds(loop_id, dry_mode=dry_mode)
+
+        gp1 = None
+        if self.bridge.status().get('connected'):
+            try:
+                gp1 = self.session.gp1 or self.session.sync_gp1(timeout_s=0.8)
+            except Exception:
+                gp1 = self.session.gp1
+
+        live = cfg.get('live_telemetry') if isinstance(cfg.get('live_telemetry'), dict) else {}
+        with self._lock:
+            tune_history = deepcopy(self._state.get('history', []))
+            best = deepcopy(self._state.get('best'))
+
+        if provider == 'rule':
+            res = _build_offline_chat_reply(
+                message=message, loop_id=loop_id, gp1=gp1, vbat_mv=self.session.vbat_mv,
+                live=live, history=tune_history, best=best, bounds=bounds,
+                effort=effort, dry_mode=dry_mode,
+            )
+            res['elapsed_ms'] = int((time.perf_counter() - t0) * 1000)
+            if on_delta and res.get('reply'):
+                on_delta(res['reply'])
+            return res
+
+        api_key = str(cfg.get('api_key') or '').strip()
+        if not api_key:
+            if provider == 'anthropic':
+                api_key = os.environ.get('TUNEPRO_AI_API_KEY') or os.environ.get('ANTHROPIC_API_KEY') or ''
+            elif provider == 'openai':
+                api_key = os.environ.get('TUNEPRO_AI_API_KEY') or os.environ.get('OPENAI_API_KEY') or ''
+
+        try:
+            return call_llm_chat_stream(
+                provider=provider,
+                base_url=str(cfg.get('base_url') or '').strip(),
+                model=str(cfg.get('model') or '').strip(),
+                api_key=api_key.strip(),
+                reasoning_effort=effort,
+                message=message,
+                chat_history=cfg.get('history') if isinstance(cfg.get('history'), list) else [],
+                loop_id=loop_id,
+                gp1=gp1,
+                vbat_mv=self.session.vbat_mv,
+                live=live,
+                tune_history=tune_history,
+                best=best,
+                bounds=bounds,
+                dry_mode=dry_mode,
+                cli_tool=cli_tool,
+                on_delta=on_delta,
+            )
+        except Exception as exc:
+            fallback = _build_offline_chat_reply(
+                message=message, loop_id=loop_id, gp1=gp1, vbat_mv=self.session.vbat_mv,
+                live=live, history=tune_history, best=best, bounds=bounds,
+                effort=effort, dry_mode=dry_mode,
+            )
+            fallback['fallback_used'] = True
+            fallback['elapsed_ms'] = int((time.perf_counter() - t0) * 1000)
+            fallback['insights'] = [f'外部模型未响应（{str(exc)[:72]}），已自动切内置诊断引擎回复。', *fallback['insights']]
+            if on_delta and fallback.get('reply'):
+                on_delta(fallback['reply'])
+            return fallback
+
+    def shutdown(self) -> None:
+        try:
+            self.stop(estop=True)
+        except Exception:
+            pass
+        try:
+            self.session.stop()
+        except Exception:
+            pass
+        LOCAL_CLI_POOL.close_all()
 
 
 AI_TUNER = AITunerManager(serial_bridge.BRIDGE)

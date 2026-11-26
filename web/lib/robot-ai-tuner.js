@@ -92,6 +92,119 @@ function nowHHMMSS() {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
+/**
+ * Clean, zero-dependency Markdown renderer for AI tuning replies.
+ * Eliminates raw **, ###, `, and list markers while highlighting telemetry params & key cues.
+ */
+function formatInlineMd(rawLine) {
+  // 1. Escape HTML first (100% XSS-safe)
+  let s = esc(rawLine);
+  // 2. Preserve inline `code` spans as placeholders so later rules don't touch inside code
+  const codeSlots = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, inner) => {
+    const idx = codeSlots.length;
+    codeSlots.push(`<code class="ait-md-code">${inner}</code>`);
+    return `\u0000C${idx}\u0000`;
+  });
+  // 3. Bold (**text** or __text__) and italic (*text*)
+  s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong class="ait-md-strong">$1</strong>');
+  s = s.replace(/__([^_\n]+?)__/g, '<strong class="ait-md-strong">$1</strong>');
+  s = s.replace(/(^|[\s(（，、；：])\*([^*\s][^*\n]*?)\*(?=[\s)），。、；：!?！？]|$)/g, '$1<em>$2</em>');
+  // 4. Strip any remaining unmatched raw markdown artifacts (stray ** or `)
+  s = s.replace(/\*\*/g, '').replace(/`/g, '');
+  // 5. Auto-pill explicit PID parameter assignments (e.g. ykp=16.5, yff=1.85, vkp=38)
+  s = s.replace(/\b((?:v|l|r|y)(?:kp|ki|ff)|dir[pd]_cur|yaw_cap|fan_pct)\s*([=≈→])\s*(-?\d+(?:\.\d+)?)/gi,
+    '<code class="ait-md-code">$1$2$3</code>');
+  // 6. Subtle iMessage semantic cue accents
+  s = s.replace(/(超调|过冲|振荡|发散|饱和|急停)/g, '<span class="ait-kw-warn">$1</span>');
+  s = s.replace(/(稳定|收敛|最佳|推荐)/g, '<span class="ait-kw-good">$1</span>');
+  // 7. Restore code slots
+  s = s.replace(/\u0000C(\d+)\u0000/g, (_, idx) => codeSlots[Number(idx)] || '');
+  return s;
+}
+
+function renderRichMarkdown(rawText) {
+  let src = String(rawText || '').replace(/\r\n?/g, '\n');
+  // Strip any <<<PARAMS>>> block or partial marker
+  src = src.replace(/<<<PARAMS>>>[\s\S]*?(?:<<<END>>>|$)/g, '').replace(/<<<(?:P(?:A(?:R(?:A(?:M(?:S(?:>{0,3})?)?)?)?)?)?)?$/g, '').trim();
+  if (!src) return '';
+
+  // Extract fenced code blocks first
+  const blocks = [];
+  src = src.replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, (_, code) => {
+    const idx = blocks.length;
+    blocks.push(`<pre class="ait-md-pre"><code>${esc(code.trim())}</code></pre>`);
+    return `\n\u0000B${idx}\u0000\n`;
+  });
+
+  const lines = src.split('\n');
+  const out = [];
+  let inList = false;
+  let para = [];
+
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push(`<p class="ait-md-p">${para.map(formatInlineMd).join('<br>')}</p>`);
+    para = [];
+  };
+  const closeList = () => {
+    if (inList) { out.push('</ul>'); inList = false; }
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushPara();
+      closeList();
+      continue;
+    }
+    const blkM = /^\u0000B(\d+)\u0000$/.exec(line);
+    if (blkM) {
+      flushPara();
+      closeList();
+      out.push(blocks[Number(blkM[1])] || '');
+      continue;
+    }
+    if (/^-{3,}$|^\*{3,}$/.test(line)) {
+      flushPara();
+      closeList();
+      out.push('<hr class="ait-md-hr">');
+      continue;
+    }
+    const hM = /^#{1,4}\s+(.+)$/.exec(line);
+    if (hM) {
+      flushPara();
+      closeList();
+      out.push(`<div class="ait-md-h">${formatInlineMd(hM[1])}</div>`);
+      continue;
+    }
+    const qM = /^>\s?(.*)$/.exec(line);
+    if (qM) {
+      flushPara();
+      closeList();
+      out.push(`<div class="ait-md-quote">${formatInlineMd(qM[1])}</div>`);
+      continue;
+    }
+    const ulM = /^(?:[-*•·]|\d+[.)、])\s+(.+)$/.exec(line);
+    if (ulM) {
+      flushPara();
+      if (!inList) { out.push('<ul class="ait-md-list">'); inList = true; }
+      out.push(`<li>${formatInlineMd(ulM[1])}</li>`);
+      continue;
+    }
+    closeList();
+    para.push(line);
+  }
+  flushPara();
+  closeList();
+  return out.join('');
+}
+
+function cleanLiveDelta(chunk) {
+  // Keep live streaming text visually crisp (no raw ** or ### clutter flashing mid-stream)
+  return String(chunk || '').replace(/\*\*/g, '').replace(/(^|\n)#{1,4}\s+/g, '$1').replace(/`/g, '');
+}
+
 export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry, onLog, onFocusView, onStateBadge }) {
   const saved = loadSavedCfg();
   let open = false;
@@ -108,6 +221,8 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
   let cliTool = ['auto', 'claude', 'codex', 'agy', 'gemini'].includes(saved.cli_tool) ? saved.cli_tool : 'auto';
   let localClis = LOCAL_CLI_DEFAULTS.map(c => ({ ...c }));
   let maxBurstTimer = 0;
+  let warmupTimer = 0;
+  let lastWarmupKey = '';
   let lastAnnouncedRound = 0;
   let wasAutoActive = false;
 
@@ -395,6 +510,31 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     } catch {}
   }
 
+  function triggerWarmup(force = false) {
+    if (elProvider.value !== 'local_cli') return;
+    const key = `${cliTool}|${elModel.value.trim()}|${currentEffort().id}`;
+    if (!force && key === lastWarmupKey) return;
+    clearTimeout(warmupTimer);
+    warmupTimer = setTimeout(async () => {
+      try {
+        const r = await fetch('/api/ai/warmup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: 'local_cli',
+            cli_tool: cliTool,
+            model: elModel.value.trim(),
+            reasoning_effort: currentEffort().id,
+          }),
+        });
+        if (r.ok) {
+          const data = await r.json();
+          if (data.ok) lastWarmupKey = key;
+        }
+      } catch {}
+    }, 180);
+  }
+
   function syncProviderUI() {
     const prov = elProvider.value;
     const isRule = prov === 'rule';
@@ -436,6 +576,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     });
 
     saveCfg({ provider: prov, cli_tool: cliTool, base_url: elUrl.value.trim(), model: elModel.value.trim(), effort: currentEffort().id });
+    if (open && isLocalCli) triggerWarmup();
   }
 
   function triggerMaxBurst() {
@@ -479,6 +620,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
       $('[data-ait-progress]').textContent = `${lastStatus?.round || 0}/${eff.rounds}`;
     }
     saveCfg({ effort: eff.id });
+    if (open && elProvider.value === 'local_cli') triggerWarmup();
   }
 
   // Mount the 2nd-order high-stiffness spring capsule slider (+ Max overdrive burst)
@@ -518,6 +660,21 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     requestAnimationFrame(() => { elFeed.scrollTop = elFeed.scrollHeight; });
   }
 
+  function buildSuggestHTML(suggested, notes, loop) {
+    if (!suggested || typeof suggested !== 'object' || !Object.keys(suggested).length) return '';
+    const pid = `prop_${++proposalSeq}`;
+    pendingProposals.set(pid, { loop: loop || elLoop.value, params: suggested, dry_mode: elDry.checked });
+    const noteText = notes && notes.length ? notes.join('；') : '已通过安全步长与幅值护栏核验';
+    return `
+      <div class="ait-suggest-card">
+        <div class="ait-suggest-params">${esc(fmtParams(suggested))}</div>
+        <div class="ait-suggest-foot">
+          <span class="ait-suggest-note">${esc(noteText)}</span>
+          <button type="button" class="ait-apply-btn" data-ait-apply-proposal="${pid}">安全写入并核验</button>
+        </div>
+      </div>`;
+  }
+
   function appendMessage({ role = 'assistant', kind = 'chat', text = '', insights = [], suggested = null, notes = [], loop = null, meta = '' }) {
     const wrap = document.createElement('article');
     wrap.className = 'ait-msg';
@@ -530,25 +687,13 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     }
 
     const insHTML = insights && insights.length
-      ? `<ul class="ait-insights">${insights.map(line => `<li>${esc(line)}</li>`).join('')}</ul>`
+      ? `<ul class="ait-insights">${insights.map(line => `<li>${formatInlineMd(line)}</li>`).join('')}</ul>`
       : '';
 
-    let suggestHTML = '';
-    if (suggested && typeof suggested === 'object' && Object.keys(suggested).length) {
-      const pid = `prop_${++proposalSeq}`;
-      pendingProposals.set(pid, { loop: loop || elLoop.value, params: suggested, dry_mode: elDry.checked });
-      const noteText = notes && notes.length ? notes.join('；') : '已通过安全步长与幅值护栏核验';
-      suggestHTML = `
-        <div class="ait-suggest-card">
-          <div class="ait-suggest-params">${esc(fmtParams(suggested))}</div>
-          <div class="ait-suggest-foot">
-            <span class="ait-suggest-note">${esc(noteText)}</span>
-            <button type="button" class="ait-apply-btn" data-ait-apply-proposal="${pid}">安全写入并核验</button>
-          </div>
-        </div>`;
-    }
+    const suggestHTML = buildSuggestHTML(suggested, notes, loop);
+    const bodyHTML = role === 'assistant' ? `<div class="ait-md-body">${renderRichMarkdown(text)}</div>` : esc(text);
 
-    wrap.innerHTML = `${headHTML}<div class="ait-msg-bubble">${esc(text)}${insHTML}${suggestHTML}</div>`;
+    wrap.innerHTML = `${headHTML}<div class="ait-msg-bubble">${bodyHTML}${insHTML}${suggestHTML}</div>`;
     elFeed.append(wrap);
     scrollChatToBottom();
     return wrap;
@@ -623,15 +768,55 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     chatBusy = true;
     elComposerWrap.dataset.thinking = 'true';
     btnSend.disabled = true;
-    const typingEl = document.createElement('div');
-    typingEl.className = 'ait-msg';
-    typingEl.dataset.role = 'assistant';
+
+    // Create live iMessage-style assistant bubble with liquid 3-dot thinking pill -> kinetic token stream
+    const streamWrap = document.createElement('article');
+    streamWrap.className = 'ait-msg is-streaming';
+    streamWrap.dataset.role = 'assistant';
+    streamWrap.dataset.kind = 'chat';
     const busyHint = elProvider.value === 'local_cli'
-      ? `正在调用本机官方 AI（${esc(shortModelName())} · ${esc(currentEffort().label)}）…`
-      : `结合实时遥测分析中（${esc(currentEffort().label)}）…`;
-    typingEl.innerHTML = `<div class="ait-msg-bubble"><span class="ait-typing"><i></i><i></i><i></i> ${busyHint}</span></div>`;
-    elFeed.append(typingEl);
+      ? `${shortModelName()} 思考中`
+      : `${currentEffort().label}分析中`;
+    streamWrap.innerHTML = `
+      <div class="ait-msg-head">
+        <span class="ait-msg-effort" data-stream-meta>⚡ ${esc(`${currentEffort().label} · ${shortModelName()}`)}</span>
+        <span data-stream-time>${nowHHMMSS()}</span>
+      </div>
+      <div class="ait-msg-bubble" data-stream-bubble>
+        <div class="ait-imsg-thinking" data-stream-think>
+          <span class="ait-imsg-dots"><i></i><i></i><i></i></span>
+          <span>${esc(busyHint)}</span>
+        </div>
+        <div class="ait-stream-live" data-stream-live hidden><span class="ait-stream-caret" aria-hidden="true"></span></div>
+      </div>`;
+    elFeed.append(streamWrap);
     scrollChatToBottom();
+
+    const bubbleEl = streamWrap.querySelector('[data-stream-bubble]');
+    const thinkEl = streamWrap.querySelector('[data-stream-think]');
+    const liveEl = streamWrap.querySelector('[data-stream-live]');
+    const caretEl = liveEl.querySelector('.ait-stream-caret');
+    const metaEl = streamWrap.querySelector('[data-stream-meta]');
+    let sawFirstDelta = false;
+    let rawAccum = '';
+    let finalData = null;
+
+    const pushDelta = deltaText => {
+      if (!deltaText) return;
+      rawAccum += deltaText;
+      const clean = cleanLiveDelta(deltaText);
+      if (!clean) return;
+      if (!sawFirstDelta) {
+        sawFirstDelta = true;
+        thinkEl.hidden = true;
+        liveEl.hidden = false;
+      }
+      const span = document.createElement('span');
+      span.className = 'ait-tok-in';
+      span.textContent = clean;
+      liveEl.insertBefore(span, caretEl);
+      elFeed.scrollTop = elFeed.scrollHeight;
+    };
 
     try {
       const live = typeof getLiveTelemetry === 'function' ? (getLiveTelemetry() || {}) : {};
@@ -639,7 +824,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
       for (const [k, v] of Object.entries(live)) {
         if (Number.isFinite(v)) cleanLive[k] = Number(v.toFixed(2));
       }
-      const r = await fetch('/api/ai/chat', {
+      const r = await fetch('/api/ai/chat-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -656,23 +841,52 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
           live_telemetry: cleanLive,
         }),
       });
-      const data = await r.json();
-      typingEl.remove();
-      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      if (!r.ok || !r.body) {
+        const errObj = await r.json().catch(() => ({}));
+        throw new Error(errObj.error || `HTTP ${r.status}`);
+      }
 
-      appendMessage({
-        role: 'assistant',
-        text: data.reply || '已完成分析。',
-        insights: data.insights || [],
-        suggested: data.suggested_params || null,
-        notes: data.guardrail_notes || [],
-        loop: data.loop || elLoop.value,
-        meta: `${currentEffort().label} · ${data.model || shortModelName()}`,
-      });
-      chatHistory.push({ role: 'assistant', text: data.reply || '' });
+      const reader = r.body.getReader();
+      const dec = new TextDecoder('utf-8');
+      let sseBuf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        sseBuf += dec.decode(value, { stream: true });
+        let sep;
+        while ((sep = sseBuf.indexOf('\n\n')) >= 0) {
+          const frame = sseBuf.slice(0, sep);
+          sseBuf = sseBuf.slice(sep + 2);
+          let evName = 'message';
+          let dataLine = '';
+          for (const ln of frame.split('\n')) {
+            if (ln.startsWith('event:')) evName = ln.slice(6).trim();
+            else if (ln.startsWith('data:')) dataLine += ln.slice(5).trim();
+          }
+          if (!dataLine) continue;
+          let payload;
+          try { payload = JSON.parse(dataLine); } catch { continue; }
+          if (evName === 'delta' && payload.t) pushDelta(payload.t);
+          else if (evName === 'done') finalData = payload;
+          else if (evName === 'error') throw new Error(payload.error || '对话流中断');
+        }
+      }
+
+      const data = finalData || { reply: rawAccum || '已完成分析。', model: shortModelName() };
+      const secTag = Number.isFinite(data.elapsed_ms) ? ` · ${(data.elapsed_ms / 1000).toFixed(1)}s` : '';
+      metaEl.textContent = `⚡ ${currentEffort().label} · ${data.model || shortModelName()}${secTag}`;
+      const insHTML = data.insights && data.insights.length
+        ? `<ul class="ait-insights">${data.insights.map(line => `<li>${formatInlineMd(line)}</li>`).join('')}</ul>`
+        : '';
+      const suggestHTML = buildSuggestHTML(data.suggested_params, data.guardrail_notes, data.loop);
+      streamWrap.classList.remove('is-streaming');
+      bubbleEl.innerHTML = `<div class="ait-md-body ait-md-settle">${renderRichMarkdown(data.reply || rawAccum || '已完成分析。')}</div>${insHTML}${suggestHTML}`;
+      chatHistory.push({ role: 'assistant', text: data.reply || rawAccum || '' });
+      scrollChatToBottom();
     } catch (e) {
-      typingEl.remove();
-      appendMessage({ role: 'assistant', kind: 'live-event', text: `对话请求失败：${e.message}` });
+      streamWrap.classList.remove('is-streaming');
+      streamWrap.dataset.kind = 'live-event';
+      bubbleEl.innerHTML = `<div class="ait-md-body">${renderRichMarkdown(`对话请求失败：${e.message}`)}</div>`;
     } finally {
       chatBusy = false;
       elComposerWrap.dataset.thinking = 'false';
@@ -1072,6 +1286,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     onStateBadge?.({ active: Boolean(lastStatus?.active), phase: lastStatus?.phase || 'idle', open });
     if (open) {
       fetchSnapshot();
+      if (elProvider.value === 'local_cli') triggerWarmup();
       if (lastStatus?.active) ensurePolling();
     }
   }

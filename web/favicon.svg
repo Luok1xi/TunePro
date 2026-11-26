@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#222228"/>
+      <stop offset="52%" stop-color="#141418"/>
+      <stop offset="100%" stop-color="#0b0b0e"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="12" y1="2" x2="52" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.34"/>
+      <stop offset="45%" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.16"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="74%" cy="37%" r="36%">
+      <stop offset="0%" stop-color="#e46b3e" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#e46b3e" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#bg)"/>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#glow)"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="15.25" stroke="url(#rim)" stroke-width="1.5"/>
+  <line x1="15" y1="24" x2="42" y2="24" stroke="#f4f3ef" stroke-opacity="0.22" stroke-width="2" stroke-linecap="round"/>
+  <path d="M15 44 C24 44, 26 24, 38.5 24 L46 24" stroke="#f5f4f0" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="47.5" cy="24" r="4.6" fill="#e46b3e"/>
+</svg>

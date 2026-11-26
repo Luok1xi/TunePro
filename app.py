@@ -37,6 +37,9 @@ import ai_tuner
 mimetypes.add_type('application/javascript; charset=utf-8', '.js')
 mimetypes.add_type('application/javascript; charset=utf-8', '.mjs')
 mimetypes.add_type('text/css; charset=utf-8', '.css')
+mimetypes.add_type('image/svg+xml', '.svg')
+mimetypes.add_type('image/x-icon', '.ico')
+mimetypes.add_type('image/png', '.png')
 
 DEMO_MODE = False
 

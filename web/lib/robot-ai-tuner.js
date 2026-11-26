@@ -580,6 +580,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
   }
 
   function triggerMaxBurst() {
+    if (document.documentElement.dataset.motion === 'off') return;
     clearTimeout(maxBurstTimer);
     elPopover.classList.remove('is-max-burst');
     elBolt.classList.remove('is-burst');

@@ -13,7 +13,9 @@ const enhancedTabs = new WeakSet();
 const REST_ANGLE = 318;
 
 export function motionOff() {
-  return reduceMedia.matches || document.documentElement.dataset.motion === 'off';
+  const mode = document.documentElement.dataset.motion;
+  if (mode === 'standard' || mode === 'subtle') return false;
+  return mode === 'off' || reduceMedia.matches;
 }
 
 /* ---------- 1. 物理折射边主按钮 (.tp-optic-btn) ---------- */

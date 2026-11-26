@@ -31,9 +31,11 @@ body.rl-root {
   position: absolute;
   inset: -10%;
   background:
-    radial-gradient(52% 42% at 14% 4%, var(--amb-light-1), transparent 70%),
-    radial-gradient(46% 38% at 84% 8%, var(--amb-light-2), transparent 68%),
-    radial-gradient(38% 36% at 52% 96%, var(--amb-light-3), transparent 72%);
+    radial-gradient(54% 46% at 12% 4%, var(--amb-light-1), transparent 68%),
+    radial-gradient(48% 42% at 86% 8%, var(--amb-light-2), transparent 66%),
+    radial-gradient(42% 38% at 50% 94%, var(--amb-light-3), transparent 70%),
+    radial-gradient(36% 32% at 78% 42%, color-mix(in srgb, var(--loop-glow) 13%, transparent), transparent 72%);
+  transition: background 320ms var(--ease-out);
 }
 
 /* ---------- Base Controls ---------- */
@@ -62,15 +64,15 @@ button:active:not(:disabled) { transform: scale(0.968); }
   initial-value: 0deg;
 }
 
-/* ---------- High-Performance Optical Glass Panel (.tp-glass) ---------- */
-/* Zero per-frame backdrop-filter readback on live-repainting panels for 60/120 FPS;
-   true hardware frosted blur is reserved for static/floating overlays (.tp-nav, .tp-readout, .eff-popover). */
+/* ---------- Physical Optical Frosted Glass Panel (.tp-glass) ---------- */
 .tp-glass {
   position: relative;
   isolation: isolate;
   contain: layout style paint;
   border-radius: var(--r-lg);
-  background: linear-gradient(164deg, var(--glass-face-hi), var(--glass-face-lo));
+  background: linear-gradient(156deg, var(--glass-face-hi), var(--glass-face-lo));
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
   box-shadow:
     inset 0 1px 0 var(--glass-rim-top),
     inset 0 0 0 1px var(--glass-rim-edge),
@@ -87,7 +89,7 @@ button:active:not(:disabled) { transform: scale(0.968); }
   z-index: 0;
   opacity: 0;
   background: radial-gradient(
-    320px circle at var(--mx, -400px) var(--my, -400px),
+    360px circle at var(--mx, -400px) var(--my, -400px),
     var(--glass-sheen),
     transparent 64%
   );
@@ -714,25 +716,25 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
 .rtp-node::before {
   content: "";
   position: absolute;
-  inset: -1px;
+  inset: -1.5px;
   border-radius: inherit;
-  padding: 1.5px;
+  padding: 2px;
   pointer-events: none;
   opacity: 0;
   background: conic-gradient(
     from var(--beam-a),
     transparent 0deg,
-    transparent 210deg,
-    color-mix(in srgb, var(--node-c) 45%, transparent) 262deg,
-    color-mix(in srgb, var(--node-c) 88%, #fff) 312deg,
+    transparent 195deg,
+    color-mix(in srgb, var(--node-c) 55%, transparent) 252deg,
+    color-mix(in srgb, var(--node-c) 95%, #fff) 308deg,
     #ffffff 336deg,
-    color-mix(in srgb, var(--node-c) 68%, transparent) 352deg,
+    color-mix(in srgb, var(--node-c) 76%, transparent) 354deg,
     transparent 360deg
   );
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
-  transition: opacity 280ms var(--ease-out);
+  transition: opacity 220ms var(--ease-out);
 }
 .rtp-node-orb {
   width: 7px;
@@ -741,23 +743,23 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
   background: var(--node-c);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--node-c) 20%, transparent);
   flex: none;
-  transition: box-shadow 260ms var(--ease-out), transform 260ms var(--spring-snappy);
+  transition: box-shadow 220ms var(--ease-out), transform 220ms var(--spring-snappy);
 }
 .rtp-node strong { font-size: var(--text-xs); font-weight: 600; }
 .rtp-node small { font: 400 10px/1.2 var(--font-mono); color: var(--c-fg-muted); }
 .rtp-node[aria-current="true"] {
-  background: color-mix(in srgb, var(--node-c) 12%, var(--glass-face-hi));
+  background: color-mix(in srgb, var(--node-c) 15%, var(--glass-face-hi));
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--node-c) 38%, transparent),
-    0 6px 22px -10px color-mix(in srgb, var(--node-c) 70%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--node-c) 46%, transparent),
+    0 8px 26px -10px color-mix(in srgb, var(--node-c) 82%, transparent);
 }
 .rtp-node[aria-current="true"]::before {
   opacity: 1;
-  animation: tp-beam-orbit 2.8s linear infinite;
+  animation: tp-beam-orbit 2.5s linear infinite;
 }
 .rtp-node[aria-current="true"] .rtp-node-orb {
-  transform: scale(1.18);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--node-c) 28%, transparent), 0 0 12px var(--node-c);
+  transform: scale(1.22);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--node-c) 32%, transparent), 0 0 14px var(--node-c);
 }
 @keyframes tp-beam-orbit {
   from { --beam-a: 0deg; }
@@ -1081,26 +1083,26 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
   border-top: 1px solid color-mix(in srgb, var(--loop-glow) 36%, transparent);
   transition: border-color 320ms var(--ease-ios);
 }
-/* Compositor-only top optical hairline synced to active loop (0% idle GPU; glides while running) */
+/* Compositor-only gliding top optical beam synced to active loop (GPU transform-only, 0% main-thread CPU) */
 .tp-inspector-shell::after {
   content: "";
   position: absolute;
   top: 0;
   left: 0;
-  width: 44%;
-  height: 2px;
+  width: 46%;
+  height: 2.5px;
   border-radius: 2px;
   pointer-events: none;
   z-index: 4;
-  background: linear-gradient(90deg, transparent, var(--loop-glow), #ffffff 68%, transparent);
-  opacity: 0.72;
-  transform: translate3d(64%, 0, 0);
-  transition: opacity 160ms var(--ease-out);
+  background: linear-gradient(90deg, transparent, var(--loop-glow), #ffffff 66%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--loop-glow) 72%, transparent);
+  opacity: 0.88;
+  will-change: transform;
+  animation: tp-rail-glide 4.8s ease-in-out infinite alternate;
 }
 .tp-inspector-shell:has([data-running="true"])::after {
-  opacity: 0.92;
-  will-change: transform;
-  animation: tp-rail-glide 3.8s ease-in-out infinite alternate;
+  opacity: 1;
+  animation-duration: 2.6s;
 }
 @keyframes tp-rail-glide {
   from { transform: translate3d(-15%, 0, 0); }
@@ -2165,14 +2167,14 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
 /* Soft upward-diffused atmospheric light radiating from the top arch of the composer */
 .ait-composer-glow {
   position: absolute;
-  left: 12px;
-  right: 12px;
-  top: -12px;
-  height: 36px;
+  left: 10px;
+  right: 10px;
+  top: -14px;
+  height: 40px;
   pointer-events: none;
   z-index: 0;
-  opacity: 0.48;
-  transform: translate3d(0, 2px, 0) scaleX(0.96);
+  opacity: 0.74;
+  transform: translate3d(0, 1px, 0) scaleX(0.98);
   transition: opacity 160ms var(--ease-out), transform 190ms var(--ease-out);
 }
 .ait-composer-glow::before {
@@ -2181,24 +2183,24 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
   inset: 0;
   border-radius: 50% 50% 0 0 / 100% 100% 0 0;
   background:
-    radial-gradient(46% 96% at 22% 94%, rgba(66, 133, 244, 0.56), transparent 72%),
-    radial-gradient(44% 96% at 48% 92%, rgba(145, 118, 255, 0.50), transparent 72%),
-    radial-gradient(42% 96% at 72% 94%, rgba(217, 101, 112, 0.46), transparent 72%),
-    radial-gradient(36% 88% at 88% 96%, rgba(228, 107, 62, 0.36), transparent 70%);
-  filter: blur(11px);
+    radial-gradient(48% 98% at 20% 94%, rgba(66, 133, 244, 0.72), transparent 72%),
+    radial-gradient(46% 98% at 48% 90%, rgba(154, 126, 255, 0.66), transparent 72%),
+    radial-gradient(44% 98% at 74% 94%, rgba(226, 104, 122, 0.60), transparent 72%),
+    radial-gradient(38% 90% at 90% 96%, rgba(235, 118, 66, 0.48), transparent 70%);
+  filter: blur(12px);
   transform-origin: 50% 100%;
 }
-html[data-theme="light"] .ait-composer-glow { opacity: 0.40; }
+html[data-theme="light"] .ait-composer-glow { opacity: 0.56; }
 html[data-theme="light"] .ait-composer-glow::before {
   background:
-    radial-gradient(46% 96% at 22% 94%, rgba(56, 122, 238, 0.40), transparent 72%),
-    radial-gradient(44% 96% at 48% 92%, rgba(132, 104, 246, 0.36), transparent 72%),
-    radial-gradient(42% 96% at 72% 94%, rgba(212, 86, 108, 0.32), transparent 72%),
-    radial-gradient(36% 88% at 88% 96%, rgba(224, 96, 46, 0.25), transparent 70%);
+    radial-gradient(48% 98% at 20% 94%, rgba(56, 122, 238, 0.52), transparent 72%),
+    radial-gradient(46% 98% at 48% 90%, rgba(132, 104, 246, 0.46), transparent 72%),
+    radial-gradient(44% 98% at 74% 94%, rgba(212, 86, 108, 0.42), transparent 72%),
+    radial-gradient(38% 90% at 90% 96%, rgba(224, 96, 46, 0.34), transparent 70%);
 }
 .ait-composer-wrap:focus-within .ait-composer-glow {
-  opacity: 0.88;
-  transform: translate3d(0, -1px, 0) scaleX(1.01);
+  opacity: 0.98;
+  transform: translate3d(0, -1px, 0) scaleX(1.02);
 }
 .ait-composer-wrap[data-effort-level="3"] .ait-composer-glow { opacity: 0.66; }
 .ait-composer-wrap[data-effort-level="4"] .ait-composer-glow {
@@ -2463,10 +2465,17 @@ html[data-theme="light"] .ait-composer-glow::before {
     0 0 34px -10px rgba(228, 107, 62, 0.34),
     0 0 22px -10px rgba(106, 174, 255, 0.24);
 }
-.eff-popover[data-level="4"] .eff-pop-prism { opacity: 0.72; }
+.eff-popover[data-level="4"] .eff-pop-prism { opacity: 0.86; }
+.eff-popover[data-level="4"] .eff-pop-prism > i {
+  animation: eff-prism-idle 6.5s linear infinite;
+}
 .eff-popover.is-max-burst .eff-pop-prism { opacity: 1; }
 .eff-popover.is-max-burst .eff-pop-prism > i {
   animation: eff-prism-burst 680ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes eff-prism-idle {
+  from { transform: rotate(318deg); }
+  to   { transform: rotate(678deg); }
 }
 @keyframes eff-prism-burst {
   0%   { transform: rotate(-42deg) scale(0.92); filter: brightness(1.45); }
@@ -2862,10 +2871,13 @@ html[data-theme="light"] .eff-track {
 /* =====================================================================
    Motion / Light Tier Overrides: 柔 (subtle) & 静 (off = Zero-FX Flat)
    ===================================================================== */
-html[data-motion="subtle"] .tp-ambient { opacity: 0.45; }
-html[data-motion="subtle"] .ait-composer-glow { opacity: 0.24; }
-html[data-motion="subtle"] .ait-composer-wrap:focus-within .ait-composer-glow { opacity: 0.46; }
-html[data-motion="subtle"] .eff-pop-prism { opacity: 0.36 !important; }
+html[data-motion="subtle"] .tp-ambient { opacity: 0.42; }
+html[data-motion="subtle"] .tp-glass { -webkit-backdrop-filter: blur(10px) saturate(140%); backdrop-filter: blur(10px) saturate(140%); }
+html[data-motion="subtle"] .tp-inspector-shell::after { animation: none; opacity: 0.45; transform: translate3d(58%, 0, 0); }
+html[data-motion="subtle"] .ait-composer-glow { opacity: 0.28; }
+html[data-motion="subtle"] .ait-composer-wrap:focus-within .ait-composer-glow { opacity: 0.50; }
+html[data-motion="subtle"] .eff-pop-prism { opacity: 0.42 !important; }
+html[data-motion="subtle"] .eff-popover[data-level="4"] .eff-pop-prism > i { animation: none; }
 html[data-motion="subtle"] .rtp-node[aria-current="true"]::before { opacity: 0.55; }
 
 /* 「静」档：彻底关闭全部环境光、散射光、环绕流光、棱镜光环、毛玻璃模糊与一切动画 */
@@ -2892,6 +2904,8 @@ html[data-motion="off"] .eff-popover {
   background: var(--c-surface) !important;
 }
 html[data-motion="off"] .tp-glass {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
   background: var(--c-surface) !important;
   box-shadow: inset 0 0 0 1px var(--c-line-strong) !important;
 }

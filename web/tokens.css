@@ -42,18 +42,18 @@
   --c-fill: rgba(242, 241, 237, 0.055);
   --c-fill-2: rgba(242, 241, 237, 0.105);
 
-  /* Physical Optical Glass Surfaces (Dark — zero-readback gradient face for 60/120 FPS) */
-  --glass-bg: rgba(24, 24, 29, 0.84);
-  --glass-face-hi: rgba(33, 33, 40, 0.88);
-  --glass-face-lo: rgba(20, 20, 25, 0.86);
-  --glass-bg-strong: rgba(22, 22, 28, 0.88);
-  --glass-nav: rgba(16, 16, 18, 0.78);
-  --glass-popover: rgba(24, 24, 31, 0.96);
-  --glass-blur: blur(20px) saturate(180%);
-  --glass-rim-top: rgba(255, 255, 255, 0.17);
-  --glass-rim-edge: rgba(255, 255, 255, 0.085);
-  --glass-sheen: rgba(255, 255, 255, 0.068);
-  --glass-shadow: 0 22px 54px -26px rgba(0, 0, 0, 0.68), 0 4px 12px -4px rgba(0, 0, 0, 0.34);
+  /* Physical Optical Glass Surfaces (Dark — luminous translucent frosted glass) */
+  --glass-bg: rgba(24, 25, 32, 0.72);
+  --glass-face-hi: rgba(36, 37, 48, 0.76);
+  --glass-face-lo: rgba(18, 19, 25, 0.74);
+  --glass-bg-strong: rgba(22, 23, 30, 0.84);
+  --glass-nav: rgba(16, 16, 20, 0.74);
+  --glass-popover: rgba(24, 25, 33, 0.90);
+  --glass-blur: blur(20px) saturate(185%);
+  --glass-rim-top: rgba(255, 255, 255, 0.24);
+  --glass-rim-edge: rgba(255, 255, 255, 0.11);
+  --glass-sheen: rgba(255, 255, 255, 0.11);
+  --glass-shadow: 0 24px 58px -24px rgba(0, 0, 0, 0.72), 0 4px 14px -4px rgba(0, 0, 0, 0.38);
 
   /* Active Loop Orbit Light Color (switched via html[data-active-loop]) */
   --loop-glow: #3fd08b;
@@ -80,9 +80,9 @@
   --g4: #f29d4b;
 
   /* Ambient Overhead 318deg Studio Light */
-  --amb-light-1: rgba(228, 107, 62, 0.13);
-  --amb-light-2: rgba(106, 174, 255, 0.11);
-  --amb-light-3: rgba(63, 208, 139, 0.07);
+  --amb-light-1: rgba(228, 107, 62, 0.22);
+  --amb-light-2: rgba(106, 174, 255, 0.19);
+  --amb-light-3: rgba(63, 208, 139, 0.13);
   --grain-opacity: 0.24;
 
   /* Canvas Oscilloscope Palette (read by Canvas via getComputedStyle) */
@@ -153,17 +153,17 @@ html[data-theme="light"] {
   --c-fill: rgba(18, 18, 20, 0.045);
   --c-fill-2: rgba(18, 18, 20, 0.085);
 
-  /* Physical Optical Glass Surfaces (Light Paper Gallery — zero-readback gradient face) */
-  --glass-bg: rgba(251, 250, 247, 0.90);
-  --glass-face-hi: rgba(255, 255, 253, 0.94);
-  --glass-face-lo: rgba(246, 244, 239, 0.90);
-  --glass-bg-strong: rgba(253, 252, 249, 0.92);
-  --glass-nav: rgba(239, 238, 235, 0.86);
-  --glass-popover: rgba(255, 255, 254, 0.97);
-  --glass-rim-top: rgba(255, 255, 255, 0.96);
-  --glass-rim-edge: rgba(18, 18, 20, 0.095);
-  --glass-sheen: rgba(255, 255, 255, 0.50);
-  --glass-shadow: 0 18px 44px -24px rgba(18, 18, 20, 0.18), 0 2px 8px -2px rgba(18, 18, 20, 0.06);
+  /* Physical Optical Glass Surfaces (Light Paper Gallery — luminous frosted white glass) */
+  --glass-bg: rgba(252, 251, 248, 0.76);
+  --glass-face-hi: rgba(255, 255, 253, 0.84);
+  --glass-face-lo: rgba(246, 244, 239, 0.76);
+  --glass-bg-strong: rgba(253, 252, 249, 0.88);
+  --glass-nav: rgba(239, 238, 235, 0.80);
+  --glass-popover: rgba(255, 255, 254, 0.94);
+  --glass-rim-top: rgba(255, 255, 255, 0.98);
+  --glass-rim-edge: rgba(18, 18, 20, 0.105);
+  --glass-sheen: rgba(255, 255, 255, 0.68);
+  --glass-shadow: 0 20px 48px -22px rgba(18, 18, 20, 0.20), 0 2px 10px -2px rgba(18, 18, 20, 0.07);
 
   --loop-glow: #1f8a4c;
 
@@ -181,9 +181,9 @@ html[data-theme="light"] {
   --c-err-soft: rgba(201, 59, 50, 0.11);
   --c-indigo: #5652c9;
 
-  --amb-light-1: rgba(217, 89, 38, 0.085);
-  --amb-light-2: rgba(57, 135, 229, 0.075);
-  --amb-light-3: rgba(36, 138, 61, 0.055);
+  --amb-light-1: rgba(217, 89, 38, 0.14);
+  --amb-light-2: rgba(57, 135, 229, 0.13);
+  --amb-light-3: rgba(36, 138, 61, 0.09);
   --grain-opacity: 0.42;
 
   --rl-c1: #1f8a4c;
@@ -219,7 +219,9 @@ html[data-motion="off"] *::after {
   transition: none !important;
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  html:not([data-motion="standard"]) *,
+  html:not([data-motion="standard"]) *::before,
+  html:not([data-motion="standard"]) *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

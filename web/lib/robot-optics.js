@@ -146,27 +146,28 @@ export function mountFluidTabs(container, { selector = 'button', activeSelector 
   ro?.observe(container);
   const mo = new MutationObserver(() => sync(false));
   mo.observe(container, { subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-pressed'] });
+  // Trigger same-frame indicator response on click so animation never trails fast clicks
+  container.addEventListener('click', () => sync(false));
   document.fonts?.ready?.then(() => sync(true));
   requestAnimationFrame(() => sync(true));
   return { sync };
 }
 
-/* ---------- 4. 2 阶阻尼弹簧 5 档磁吸推理强度胶囊滑块 ---------- */
-export function mountEffortSlider(trackEl, { levels = 5, initialIndex = 2, onChange, onSnap } = {}) {
+/* ---------- 4. 2 阶高刚度跟手弹簧 5 档磁吸推理强度胶囊滑块（含 Max 超频冲击波） ---------- */
+export function mountEffortSlider(trackEl, { levels = 5, initialIndex = 2, onChange, onSnap, onMaxHit } = {}) {
   const fillEl = trackEl.querySelector('[data-eff-fill]');
   const thumbEl = trackEl.querySelector('[data-eff-thumb]');
   const dots = [...trackEl.querySelectorAll('[data-eff-dot]')];
 
   let idx = Math.max(0, Math.min(levels - 1, initialIndex));
-  let pos = idx / (levels - 1);       // animated normalized 0..1
-  let vel = 0;                        // normalized velocity / s
+  let pos = idx / (levels - 1);
+  let vel = 0;
   let targetPos = pos;
   let dragging = false;
   let raf = 0;
   let lastTs = 0;
   let trackRect = null;
 
-  // Analytical 2nd-order spring step (Apple interactive spring: crisp, tactile, zero jitter)
   const stepSpring = (dt, stiffness, damping) => {
     const disp = pos - targetPos;
     const accel = -stiffness * disp - damping * vel;
@@ -185,19 +186,18 @@ export function mountEffortSlider(trackEl, { levels = 5, initialIndex = 2, onCha
     const thumbSize = 30;
     const pad = 4;
     const travel = Math.max(1, w - thumbSize - pad * 2);
-    const clamped = Math.max(-0.03, Math.min(1.03, pos));
+    const clamped = Math.max(-0.02, Math.min(1.02, pos));
     const tx = pad + clamped * travel;
     const fillW = Math.max(thumbSize + pad * 2, tx + thumbSize + pad);
 
-    // Liquid jelly velocity squish while sliding rapidly
-    const speed = Math.min(1, Math.abs(vel) * 0.24);
-    const sx = dragging ? 1 + speed * 0.22 : 1 + speed * 0.14;
-    const sy = dragging ? 1 - speed * 0.11 : 1 - speed * 0.07;
+    // Snappy liquid jelly squish proportional to velocity
+    const speed = Math.min(1, Math.abs(vel) * 0.18);
+    const sx = dragging ? 1 + speed * 0.24 : 1 + speed * 0.14;
+    const sy = dragging ? 1 - speed * 0.12 : 1 - speed * 0.07;
 
     fillEl.style.width = `${Math.max(36, Math.min(w, fillW)).toFixed(1)}px`;
     thumbEl.style.transform = `translate3d(${tx.toFixed(2)}px, 0, 0) scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`;
 
-    // Illuminate dots inside the filled ink region vs outside
     for (let i = 0; i < dots.length; i++) {
       const dotNorm = i / (levels - 1);
       dots[i].dataset.filled = String(dotNorm <= clamped + 0.03);
@@ -207,11 +207,12 @@ export function mountEffortSlider(trackEl, { levels = 5, initialIndex = 2, onCha
 
   const loop = ts => {
     raf = 0;
-    const dt = Math.min(0.032, Math.max(0.004, (ts - (lastTs || ts - 16)) / 1000));
+    const dt = Math.min(0.032, Math.max(0.003, (ts - (lastTs || ts - 8)) / 1000));
     lastTs = ts;
+    // High-stiffness critically-fast spring -> instant finger tracking, zero mushy lag!
     const moving = motionOff()
       ? ((pos = targetPos), (vel = 0), false)
-      : stepSpring(dt, dragging ? 520 : 340, dragging ? 34 : 26);
+      : stepSpring(dt, dragging ? 960 : 680, dragging ? 48 : 38);
     render();
     if (moving || dragging) raf = requestAnimationFrame(loop);
   };
@@ -220,17 +221,21 @@ export function mountEffortSlider(trackEl, { levels = 5, initialIndex = 2, onCha
     if (!raf) { lastTs = 0; raf = requestAnimationFrame(loop); }
   };
 
+  const notifyChange = (prev, next) => {
+    onChange?.(next);
+    onSnap?.(next);
+    if (next === levels - 1 && prev !== levels - 1) onMaxHit?.();
+  };
+
   const setIndex = (next, { notify = true, kick = true } = {}) => {
     const clamped = Math.max(0, Math.min(levels - 1, Math.round(next)));
-    const changed = clamped !== idx;
+    const prev = idx;
+    const changed = clamped !== prev;
     idx = clamped;
     targetPos = idx / (levels - 1);
-    if (kick && changed && !motionOff()) vel += (targetPos > pos ? 1.4 : -1.4);
+    if (kick && changed && !motionOff()) vel += (targetPos > pos ? 1.8 : -1.8);
     wake();
-    if (changed) {
-      if (notify) onChange?.(idx);
-      onSnap?.(idx);
-    }
+    if (changed && notify) notifyChange(prev, idx);
   };
 
   const normFromClientX = clientX => {
@@ -247,12 +252,11 @@ export function mountEffortSlider(trackEl, { levels = 5, initialIndex = 2, onCha
     trackEl.classList.add('is-dragging');
     const norm = normFromClientX(e.clientX);
     const nearest = Math.round(norm * (levels - 1));
-    // Subtle magnetic pull toward nearest detent even while dragging
-    targetPos = norm * 0.72 + (nearest / (levels - 1)) * 0.28;
+    targetPos = norm * 0.78 + (nearest / (levels - 1)) * 0.22;
     if (nearest !== idx) {
+      const prev = idx;
       idx = nearest;
-      onChange?.(idx);
-      onSnap?.(idx);
+      notifyChange(prev, idx);
     }
     wake();
   });
@@ -261,11 +265,11 @@ export function mountEffortSlider(trackEl, { levels = 5, initialIndex = 2, onCha
     if (!dragging) return;
     const norm = normFromClientX(e.clientX);
     const nearest = Math.round(norm * (levels - 1));
-    targetPos = norm * 0.74 + (nearest / (levels - 1)) * 0.26;
+    targetPos = norm * 0.78 + (nearest / (levels - 1)) * 0.22;
     if (nearest !== idx) {
+      const prev = idx;
       idx = nearest;
-      onChange?.(idx);
-      onSnap?.(idx);
+      notifyChange(prev, idx);
     }
     wake();
   });

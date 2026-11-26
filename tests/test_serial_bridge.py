@@ -111,6 +111,33 @@ class SerialBridgeTest(unittest.TestCase):
             self.assertTrue((folder / 'm2-decoded.csv').is_file())
             self.assertTrue((folder / 'summary.json').is_file())
 
+    def test_raw_binary_stream_skips_control_sse_data(self):
+        created: list[FakeSerial] = []
+
+        def factory(port: str, baud: int):
+            s = FakeSerial(port, baud)
+            created.append(s)
+            return s
+
+        bridge = serial_bridge.SerialBridge(serial_factory=factory)
+        ctrl_q = bridge.subscribe(include_data=False)
+        raw_q = bridge.subscribe_raw()
+        try:
+            bridge.connect('COM7', 115200, auto_reconnect=False, auto_log=False)
+            ser = created[-1]
+            payload = b'\xa5\x5b\x01RAW_BINARY_FRAME\r\n'
+            ser.rx.put(payload)
+            got = raw_q.get(timeout=1.0)
+            self.assertEqual(got, payload)
+            # Control-only SSE subscriber must NOT receive Base64 data events
+            while not ctrl_q.empty():
+                ev, _ = ctrl_q.get_nowait()
+                self.assertNotEqual(ev, 'data')
+        finally:
+            bridge.unsubscribe(ctrl_q)
+            bridge.unsubscribe_raw(raw_q)
+            bridge.disconnect()
+
 
 if __name__ == '__main__':
     unittest.main()

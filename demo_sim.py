@@ -30,12 +30,24 @@ IMG_W = 188
 IMG_H = 120
 
 
+def _build_crc16_table() -> tuple[int, ...]:
+    tbl = []
+    for i in range(256):
+        c = i << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+        tbl.append(c)
+    return tuple(tbl)
+
+
+_CRC16_TABLE = _build_crc16_table()
+
+
 def crc16(data: bytes, crc: int = 0xFFFF) -> int:
     """CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF; check('123456789') == 0x29B1)."""
+    tbl = _CRC16_TABLE
     for ch in data:
-        crc ^= ch << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+        crc = ((crc << 8) & 0xFFFF) ^ tbl[((crc >> 8) ^ ch) & 0xFF]
     return crc
 
 
@@ -71,6 +83,56 @@ def _u32(v: int) -> int:
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else (hi if v > hi else v)
+
+
+def _emit_rle_run(out: bytearray, is_white: bool, count: int) -> None:
+    hi = 0x80 if is_white else 0
+    while count > 127:
+        out.append(hi | 127)
+        count -= 127
+    if count > 0:
+        out.append(hi | count)
+
+
+def _build_track_rle_fast(error_px: float, phase_t: float) -> tuple[bytes, int]:
+    """Direct row-span RLE encoder for 188x120 binary track (~180x faster than pixel-by-pixel)."""
+    curve = math.sin(phase_t * 0.9) * 18.0
+    out = bytearray()
+    white_cnt = 0
+    pending_white = False
+    pending_run = 0
+
+    def push(is_white: bool, cnt: int) -> None:
+        nonlocal pending_white, pending_run
+        if cnt <= 0:
+            return
+        if pending_run == 0:
+            pending_white = is_white
+            pending_run = cnt
+        elif pending_white == is_white:
+            pending_run += cnt
+        else:
+            _emit_rle_run(out, pending_white, pending_run)
+            pending_white = is_white
+            pending_run = cnt
+
+    for y in range(IMG_H):
+        ny = (y - 60) / 60.0
+        cx = IMG_W * 0.5 + error_px + curve * (ny * ny - 0.35)
+        half_w = 13.0 + (y / IMG_H) * 16.0
+        x0 = max(0, int(cx - half_w))
+        x1 = min(IMG_W, int(cx + half_w))
+        if x1 > x0:
+            push(False, x0)
+            push(True, x1 - x0)
+            push(False, IMG_W - x1)
+            white_cnt += x1 - x0
+        else:
+            push(False, IMG_W)
+    if pending_run:
+        _emit_rle_run(out, pending_white, pending_run)
+    avg_gray = int(38 + (white_cnt / (IMG_W * IMG_H)) * 175)
+    return bytes(out), avg_gray
 
 
 def _rle_encode_binary(pixels: bytes) -> bytes:
@@ -512,7 +574,8 @@ class MockCarSerial:
                 return
             if sub == 'IMG' and len(parts) == 4:
                 self.img_mode = int(_clamp(int(parts[2]), 0, 3))
-                self.img_fps = int(_clamp(int(parts[3]), 1, 15))
+                raw_fps = int(parts[3])
+                self.img_fps = 0 if raw_fps <= 0 else int(_clamp(raw_fps, 1, 120))
                 self._emit(sign_line(f'@RA1,IMG,0,{self.img_mode},{self.img_fps}'))
                 return
             if sub == 'CAP':
@@ -1007,8 +1070,10 @@ class MockCarSerial:
         self.frame_seq += 1
         fmt_map = {1: 1, 2: 3, 3: 4}
         fmt = fmt_map.get(self.img_mode, 1)
-        raw_img, avg_gray = _build_track_image(self.image_error, self.img_mode, self.stamp_ms / 1000.0, binary=(self.img_mode == 1))
-        payload = _rle_encode_binary(raw_img) if fmt == 1 else raw_img
+        if fmt == 1:
+            payload, avg_gray = _build_track_rle_fast(self.image_error, self.stamp_ms / 1000.0)
+        else:
+            payload, avg_gray = _build_track_image(self.image_error, self.img_mode, self.stamp_ms / 1000.0, binary=False)
         pkt = _pack_slice_packets(
             fmt=fmt,
             payload=payload,
@@ -1027,23 +1092,27 @@ class MockCarSerial:
         next_tick = time.monotonic()
         last_status = next_tick
         last_img = next_tick
+        sub_tick = 0
         while not self._stop_ev.is_set():
             now = time.monotonic()
             if now < next_tick:
-                time.sleep(min(0.005, next_tick - now))
+                time.sleep(min(0.0025, next_tick - now))
                 continue
-            for _ in range(10):
+            # 10 ms outer tick (5x 2ms physics): keeps @M2 at 50 Hz while letting unlocked camera reach 100 Hz!
+            for _ in range(5):
                 self.step_2ms(now)
+            sub_tick ^= 1
             with self._lock:
-                self._emit(self._format_m2())
+                if sub_tick == 0:
+                    self._emit(self._format_m2())
                 if now - last_status >= 0.25:
                     last_status = now
                     self._emit(self._format_status())
                 if self.img_mode > 0:
-                    interval = 1.0 / max(1, min(15, self.img_fps))
+                    interval = 0.0 if self.img_fps <= 0 else (1.0 / min(120, self.img_fps))
                     if now - last_img >= interval:
                         last_img = now
                         self._emit_compressed_frame()
-            next_tick += 0.020
+            next_tick += 0.010
             if next_tick < now - 0.1:
-                next_tick = now + 0.020
+                next_tick = now + 0.010

@@ -135,7 +135,7 @@ const VIEWS = {
 };
 
 let transport = 'bridge';
-let bridgeConn = false, bridgeES = null;
+let bridgeConn = false, bridgeES = null, rawStreamAbort = null;
 let wsPort = null, wsReader = null, wsWriter = null;
 const isConnected = () => (transport === 'bridge' ? bridgeConn : Boolean(wsPort && wsWriter));
 
@@ -143,7 +143,8 @@ const store = createStore(120000);
 const ingest = createIngest(store);
 let currentView = 'speed', spanSec = 10, following = true, viewEnd = 0, hoverT = null, dirty = true;
 let mainChart = null;
-let lastFrame = null, badCnt = 0, byteLog = [], frameTimes = [];
+let lastFrame = null, pendingFrame = null, lastCamMetaPaint = 0;
+let badCnt = 0, byteLog = [], frameTimes = [];
 let camImgData = null, camImg32 = null, camImgW = 0, camImgH = 0, lastGuideKey = '';
 let logsDirty = false;
 const logs = [];
@@ -294,9 +295,9 @@ const parse = createLiveParser(ev => {
     dirty = true;
   } else if (ev.type === 'frame') {
     lastFrame = ev;
+    pendingFrame = ev; // Coalesce onto native monitor vsync -> 0 wasted offscreen paints at 60~240 FPS!
     frameTimes.push(now);
-    while (frameTimes.length && now - frameTimes[0] > 3000) frameTimes.shift();
-    drawFrame(ev);
+    while (frameTimes.length && now - frameTimes[0] > 2000) frameTimes.shift();
   } else if (ev.type === 'frame-lost') {
     badCnt++;
     addLog('error', `丢图 #${ev.seq}：${ev.reason}`);
@@ -350,18 +351,41 @@ async function refreshPorts() {
   }
 }
 
+function stopRawStream() {
+  if (rawStreamAbort) {
+    try { rawStreamAbort.abort(); } catch {}
+    rawStreamAbort = null;
+  }
+}
+
+function startRawStream() {
+  stopRawStream();
+  const ac = new AbortController();
+  rawStreamAbort = ac;
+  (async () => {
+    while (!ac.signal.aborted && bridgeConn) {
+      try {
+        const resp = await fetch('/api/serial/raw-stream', { cache: 'no-store', signal: ac.signal });
+        if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+        const reader = resp.body.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done || ac.signal.aborted) break;
+          if (value && value.length) feedBytes(value);
+        }
+      } catch (e) {
+        if (ac.signal.aborted || !bridgeConn) break;
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+  })();
+}
+
 function attachSSE(st) {
   if (bridgeES) { bridgeES.close(); bridgeES = null; }
   bridgeConn = Boolean(st.connected);
-  bridgeES = new EventSource('/api/serial/stream');
-  bridgeES.addEventListener('data', ev => {
-    try {
-      const { b64 } = JSON.parse(ev.data);
-      const bin = atob(b64), bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      feedBytes(bytes);
-    } catch {}
-  });
+  // Control-only SSE for status/saved; high-rate bytes flow over zero-Base64 /api/serial/raw-stream!
+  bridgeES = new EventSource('/api/serial/stream?events=control');
   bridgeES.addEventListener('status', ev => {
     try {
       const s = JSON.parse(ev.data);
@@ -372,8 +396,9 @@ function attachSSE(st) {
   bridgeES.addEventListener('saved', ev => {
     try { const { path } = JSON.parse(ev.data); addLog('event', `已自动落盘保存：${path}`); } catch {}
   });
+  startRawStream();
   setConnUI(true, `已连 ${st.port} (${st.baud})`);
-  addLog('event', `本机串口桥已连接 ${st.port} · ${st.baud}`);
+  addLog('event', `本机串口桥已连接 ${st.port} · ${st.baud}（零 Base64 二进制高速流）`);
   tunePro.onConnected();
   aiTuner.onConnected();
 }
@@ -424,6 +449,7 @@ async function connect() {
 }
 
 async function disconnect() {
+  stopRawStream();
   if (bridgeES) { bridgeES.close(); bridgeES = null; }
   if (bridgeConn) {
     bridgeConn = false;
@@ -506,16 +532,20 @@ function drawFrame(f) {
   }
   camCtx.putImageData(camImgData, 0, 0);
   drawGuides(true);
-  const fps = frameTimes.length >= 2 ? ((frameTimes.length - 1) * 1000 / Math.max(1, frameTimes.at(-1) - frameTimes[0])).toFixed(1) : '—';
-  const tag = f.compressed ? ({ 1: '二值 RLE', 2: '二值 1bit', 3: '灰度 94×60', 4: '灰度 47×30' }[f.fmt] || '压缩') : (f.kind === 'bin' ? '二值' : '灰度');
-  $('[data-cam-title]').textContent = `${tag} · #${f.seq} · ${fps} fps${f.compBytes ? ` · ${f.compBytes} B` : ''}`;
-  const m = f.meta;
-  if (m) {
-    $('[data-cam-stats]').innerHTML =
-      `偏差 <b>${m.image_error} px</b> · 均灰 <b>${m.avg_gray}</b>${m.avg_gray > 175 ? ' <span data-level="warn">⚠ 反光偏亮</span>' : ''} · L/R <b>${m.lp}/${m.rp}</b> · 步 <b>k=${m.route_k}</b>`;
-  } else {
-    const s = frameStats(f.pixels);
-    $('[data-cam-stats]').innerHTML = `最小 <b>${s.min}</b> · 中位 <b>${s.median}</b> · 最大 <b>${s.max}</b> · 过曝 <b>${s.saturated}</b>`;
+  const now = performance.now();
+  if (now - lastCamMetaPaint >= 95) {
+    lastCamMetaPaint = now;
+    const fps = frameTimes.length >= 2 ? ((frameTimes.length - 1) * 1000 / Math.max(1, frameTimes.at(-1) - frameTimes[0])).toFixed(1) : '—';
+    const tag = f.compressed ? ({ 1: '二值 RLE', 2: '二值 1bit', 3: '灰度 94×60', 4: '灰度 47×30' }[f.fmt] || '压缩') : (f.kind === 'bin' ? '二值' : '灰度');
+    $('[data-cam-title]').textContent = `${tag} · #${f.seq} · ${fps} fps${f.compBytes ? ` · ${f.compBytes} B` : ''}`;
+    const m = f.meta;
+    if (m) {
+      $('[data-cam-stats]').innerHTML =
+        `偏差 <b>${m.image_error} px</b> · 均灰 <b>${m.avg_gray}</b>${m.avg_gray > 175 ? ' <span data-level="warn">⚠ 反光偏亮</span>' : ''} · L/R <b>${m.lp}/${m.rp}</b> · 步 <b>k=${m.route_k}</b>`;
+    } else {
+      const s = frameStats(f.pixels);
+      $('[data-cam-stats]').innerHTML = `最小 <b>${s.min}</b> · 中位 <b>${s.median}</b> · 最大 <b>${s.max}</b> · 过曝 <b>${s.saturated}</b>`;
+    }
   }
   $('[data-save-png]').disabled = false;
 }
@@ -609,7 +639,7 @@ $('[data-inspector-expand]').addEventListener('click', e => {
   ws.dataset.wideInspector = String(next);
   e.currentTarget.setAttribute('aria-pressed', String(next));
   e.currentTarget.textContent = next ? '收窄' : '展宽';
-  setTimeout(() => { dirty = true; }, 320);
+  requestAnimationFrame(() => { dirty = true; });
 });
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape') aiTuner.onEmergencyStop();
@@ -677,20 +707,25 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// ---------- 30 fps 刷新循环（后台隐藏零绘制 + 差分更新零抖动） ----------
-let lastVer = -1, lastDraw = 0, lastDiag = 0, lastDiagHTML = '';
+// ---------- 无上限原生高刷渲染循环（60/120/144/240 FPS 跟随屏幕刷新率，零每帧限速） ----------
+let lastVer = -1, lastDiag = 0, lastDiagHTML = '';
 function tick(now) {
   requestAnimationFrame(tick);
   if (document.hidden) return;
-  if ((dirty || (following && store.version !== lastVer)) && now - lastDraw > 32) {
-    lastDraw = now; lastVer = store.version; dirty = false;
+  if (pendingFrame) {
+    const f = pendingFrame;
+    pendingFrame = null;
+    drawFrame(f);
+  }
+  if (dirty || (following && store.version !== lastVer)) {
+    lastVer = store.version; dirty = false;
     const [t0, t1] = getWindow();
     const { readout } = mainChart.draw({ t0, t1, hoverT });
     const hideBox = !readout.length || hoverT === null;
     if (readoutEl.hidden !== hideBox) readoutEl.hidden = hideBox;
     if (!hideBox) readoutEl.innerHTML = readout.map(r => `<span style="--c:var(${r.color})">${esc(r.label)} <b>${Math.abs(r.v) >= 100 ? r.v.toFixed(0) : r.v.toFixed(2)}</b></span>`).join('');
   }
-  if (now - lastDiag > 220) {
+  if (now - lastDiag > 160) {
     lastDiag = now;
     const [t0, t1] = getWindow();
     const chips = VIEWS[currentView].diag(store, t0, t1);

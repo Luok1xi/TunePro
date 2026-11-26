@@ -153,6 +153,31 @@ class DemoSimTest(unittest.TestCase):
             bridge.unsubscribe(sub)
             bridge.disconnect()
 
+    def test_unlocked_fps_and_fast_rle_decoder(self):
+        car = demo_sim.MockCarSerial('MOCK0', 115200, realtime=False)
+        try:
+            self._drain(car)
+            # 0 = unlocked FPS
+            car.write(demo_sim.sign_line('#X IMG 1 0'))
+            ack = self._drain(car)
+            self.assertIn(b'@RA1,IMG,0,1,0*', ack)
+            self.assertEqual(car.img_mode, 1)
+            self.assertEqual(car.img_fps, 0)
+
+            car._emit_compressed_frame()
+            pkt = self._drain(car)
+            self.assertTrue(pkt.startswith(b'\xa5\x5b'))
+
+            rle, avg_gray = demo_sim._build_track_rle_fast(-14.5, 1.25)
+            self.assertGreater(len(rle), 10)
+            self.assertGreaterEqual(avg_gray, 30)
+            self.assertLessEqual(avg_gray, 230)
+            # Decode RLE runs and verify exact 188 * 120 pixel count
+            total_px = sum(b & 0x7F for b in rle)
+            self.assertEqual(total_px, demo_sim.IMG_W * demo_sim.IMG_H)
+        finally:
+            car.close()
+
 
 if __name__ == '__main__':
     unittest.main()

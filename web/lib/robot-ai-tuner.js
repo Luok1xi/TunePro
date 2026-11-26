@@ -21,11 +21,19 @@ const EFFORT_LEVELS = [
 ];
 
 const MODEL_PRESETS = [
-  { id: 'rule',     label: '内置离线', provider: 'rule',      url: '',                             model: '' },
-  { id: 'deepseek', label: 'DeepSeek', provider: 'openai',    url: 'https://api.deepseek.com/v1',  model: 'deepseek-chat' },
-  { id: 'ollama',   label: 'Ollama',   provider: 'ollama',    url: 'http://127.0.0.1:11434/v1',    model: 'qwen2.5:7b' },
-  { id: 'openai',   label: 'OpenAI',   provider: 'openai',    url: 'https://api.openai.com/v1',    model: 'gpt-4o-mini' },
-  { id: 'claude',   label: 'Claude',   provider: 'anthropic', url: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-latest' },
+  { id: 'rule',      label: '内置离线',   provider: 'rule',      url: '',                             model: '' },
+  { id: 'local_cli', label: '本机官方 AI', provider: 'local_cli', url: '',                             model: '' },
+  { id: 'deepseek',  label: 'DeepSeek',  provider: 'openai',    url: 'https://api.deepseek.com/v1',  model: 'deepseek-chat' },
+  { id: 'ollama',    label: 'Ollama',    provider: 'ollama',    url: 'http://127.0.0.1:11434/v1',    model: 'qwen2.5:7b' },
+  { id: 'openai',    label: 'OpenAI',    provider: 'openai',    url: 'https://api.openai.com/v1',    model: 'gpt-4o-mini' },
+  { id: 'claude',    label: 'Claude',    provider: 'anthropic', url: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-latest' },
+];
+
+const LOCAL_CLI_DEFAULTS = [
+  { id: 'claude', label: 'Claude Code', available: false, desc: '本机已登录 Claude 官方额度' },
+  { id: 'codex',  label: 'Codex CLI',   available: false, desc: '本机已登录 OpenAI / Codex 官方额度' },
+  { id: 'agy',    label: 'Antigravity', available: false, desc: '本机已登录 Google Antigravity 官方额度' },
+  { id: 'gemini', label: 'Gemini CLI',  available: false, desc: '本机已登录 Google Gemini 官方额度' },
 ];
 
 const QUICK_PROMPTS = [
@@ -97,6 +105,9 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
   let modelDrawerOpen = false;
   let effortIdx = Math.max(0, Math.min(EFFORT_LEVELS.length - 1, EFFORT_LEVELS.findIndex(e => e.id === (saved.effort || 'medium'))));
   if (effortIdx < 0) effortIdx = 2;
+  let cliTool = ['auto', 'claude', 'codex', 'agy', 'gemini'].includes(saved.cli_tool) ? saved.cli_tool : 'auto';
+  let localClis = LOCAL_CLI_DEFAULTS.map(c => ({ ...c }));
+  let maxBurstTimer = 0;
   let lastAnnouncedRound = 0;
   let wasAutoActive = false;
 
@@ -191,9 +202,10 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     <div class="ait-chat-feed" data-ait-chat-feed role="log" aria-live="polite"></div>
 
     <!-- 底部玻璃输入框 + 推理强度/模型悬浮窗 -->
-    <div class="ait-composer-wrap" data-ait-composer-wrap>
+    <div class="ait-composer-wrap" data-ait-composer-wrap data-effort-level="${effortIdx}" data-thinking="false">
       <!-- 悬浮毛玻璃推理强度与模型切换浮层 -->
       <div class="eff-popover" data-eff-popover data-level="${effortIdx}" role="dialog" aria-label="选择推理强度与模型">
+        <span class="eff-pop-prism" aria-hidden="true"><i></i></span>
         <div class="eff-pop-head">
           <span class="eff-bolt" data-eff-bolt data-level="${effortIdx}">${BOLT_SVG}</span>
           <div class="eff-head-center">
@@ -219,6 +231,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
             <span class="eff-dot" data-eff-dot="3"></span>
             <span class="eff-dot" data-eff-dot="4"></span>
           </div>
+          <span class="eff-max-wave" data-eff-max-wave aria-hidden="true"></span>
           <div class="eff-thumb" data-eff-thumb></div>
         </div>
 
@@ -238,20 +251,26 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
                 <span>通道协议</span>
                 <select data-ait-provider>
                   <option value="rule">内置循证引擎（零 API Key · 离线可用）</option>
+                  <option value="local_cli">本机官方 AI（直连本机已登录额度 · 免 API Key）</option>
                   <option value="openai">OpenAI 兼容（DeepSeek / 通义 / vLLM / OpenAI）</option>
                   <option value="ollama">Ollama 本地大模型</option>
                   <option value="anthropic">Anthropic Claude</option>
                 </select>
               </label>
-              <label class="eff-field is-full" data-ait-llm-row>
+              <div class="eff-cli-box eff-field is-full" data-ait-cli-row hidden>
+                <span>本机已登录官方 CLI</span>
+                <div class="eff-cli-chips" data-eff-cli-chips></div>
+                <div class="eff-cli-note" data-eff-cli-note>直连本机已登录官方额度，免填 API Key。</div>
+              </div>
+              <label class="eff-field is-full" data-ait-remote-row>
                 <span>Base URL</span>
                 <input type="text" data-ait-url placeholder="https://api.deepseek.com/v1" autocomplete="off" spellcheck="false">
               </label>
-              <label class="eff-field" data-ait-llm-row>
+              <label class="eff-field" data-ait-model-row>
                 <span>Model 名称</span>
                 <input type="text" data-ait-model placeholder="deepseek-chat" autocomplete="off" spellcheck="false">
               </label>
-              <label class="eff-field" data-ait-llm-row>
+              <label class="eff-field" data-ait-remote-row>
                 <span>API Key（仅内存）</span>
                 <input type="password" data-ait-key placeholder="留空读环境变量" autocomplete="off">
               </label>
@@ -260,7 +279,8 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
         </div>
       </div>
 
-      <!-- 底部聊天输入胶囊 -->
+      <!-- Gemini 风格顶部散射光晕 + 底部聊天输入胶囊 -->
+      <div class="ait-composer-glow" aria-hidden="true"></div>
       <div class="ait-composer">
         <textarea data-ait-chat-input rows="1" placeholder="描述波形现象或车体体感，例如：入弯超调太大 / 响应太慢…"></textarea>
         <div class="ait-composer-bar">
@@ -302,6 +322,10 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
   const elChatInput = $('[data-ait-chat-input]');
   const btnSend = $('[data-ait-send]');
   const elPopover = $('[data-eff-popover]');
+  const elComposerWrap = $('[data-ait-composer-wrap]');
+  const elMaxWave = $('[data-eff-max-wave]');
+  const elCliChips = $('[data-eff-cli-chips]');
+  const elCliNote = $('[data-eff-cli-note]');
   const btnTrigger = $('[data-eff-trigger]');
   const elBolt = $('[data-eff-bolt]');
   const elEffTitle = $('[data-eff-title]');
@@ -313,7 +337,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
   const btnRunsToggle = $('[data-ait-runs-toggle]');
 
   // Restore saved non-secret preferences
-  if (saved.provider && ['rule', 'openai', 'ollama', 'anthropic'].includes(saved.provider)) elProvider.value = saved.provider;
+  if (saved.provider && ['rule', 'local_cli', 'openai', 'ollama', 'anthropic'].includes(saved.provider)) elProvider.value = saved.provider;
   if (saved.base_url) elUrl.value = saved.base_url;
   if (saved.model) elModel.value = saved.model;
   if (saved.goal && ['balanced', 'fast_response', 'low_overshoot', 'stability_first'].includes(saved.goal)) elGoal.value = saved.goal;
@@ -324,17 +348,66 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     const p = elProvider.value;
     const m = elModel.value.trim();
     if (p === 'rule') return '内置循证引擎';
+    if (p === 'local_cli') {
+      if (m) return `${m} · 本机`;
+      if (cliTool !== 'auto') {
+        const hit = localClis.find(c => c.id === cliTool);
+        return hit ? hit.label : cliTool;
+      }
+      const firstAvail = localClis.find(c => c.available);
+      return firstAvail ? `${firstAvail.label} · 本机` : '本机官方 AI';
+    }
     if (m) return m;
     if (p === 'ollama') return 'qwen2.5:7b';
     if (p === 'anthropic') return 'Claude 3.5';
     return 'OpenAI 兼容';
   }
 
+  function renderLocalCliChips() {
+    if (!elCliChips) return;
+    const availCount = localClis.filter(c => c.available).length;
+    const items = [
+      { id: 'auto', label: '自动探测', available: availCount > 0, desc: '自动选用首个可用的本机已登录官方 CLI' },
+      ...localClis,
+    ];
+    elCliChips.innerHTML = items.map(c => (
+      `<button type="button" class="eff-cli-chip" data-eff-cli="${esc(c.id)}" data-avail="${c.available ? 'true' : 'false'}" aria-pressed="${cliTool === c.id ? 'true' : 'false'}" title="${esc(c.desc || c.label)}">`
+      + `<i class="eff-cli-dot" aria-hidden="true"></i><span>${esc(c.label)}</span></button>`
+    )).join('');
+    if (elCliNote) {
+      const names = localClis.filter(c => c.available).map(c => c.label);
+      elCliNote.textContent = names.length
+        ? `已检测到本机官方额度：${names.join(' / ')}（直连免 API Key）`
+        : '暂未检测到本机 CLI（安装并登录 Claude Code / Codex / agy / Gemini 后即可免 Key 直连）';
+    }
+  }
+
+  async function fetchLocalClis() {
+    try {
+      const r = await fetch('/api/ai/local-clis', { cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (Array.isArray(data.clis) && data.clis.length) {
+        localClis = data.clis;
+        renderLocalCliChips();
+        syncProviderUI();
+      }
+    } catch {}
+  }
+
   function syncProviderUI() {
     const prov = elProvider.value;
     const isRule = prov === 'rule';
-    $$('[data-ait-llm-row]').forEach(row => { row.hidden = isRule; });
-    if (prov === 'ollama') {
+    const isLocalCli = prov === 'local_cli';
+    $$('[data-ait-cli-row]').forEach(row => { row.hidden = !isLocalCli; });
+    $$('[data-ait-remote-row]').forEach(row => { row.hidden = isRule || isLocalCli; });
+    $$('[data-ait-model-row]').forEach(row => {
+      row.hidden = isRule;
+      row.classList.toggle('is-full', isLocalCli);
+    });
+    if (isLocalCli) {
+      elModel.placeholder = '留空默认用该 CLI 官方模型';
+    } else if (prov === 'ollama') {
       elUrl.placeholder = 'http://127.0.0.1:11434/v1';
       elModel.placeholder = 'qwen2.5:7b';
       if (!elUrl.value.trim()) elUrl.value = 'http://127.0.0.1:11434/v1';
@@ -347,13 +420,14 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     }
     const label = shortModelName();
     $('[data-eff-model-label]').textContent = label;
-    $('[data-eff-trigger-model]').textContent = prov === 'rule' ? '内置引擎' : label;
+    $('[data-eff-trigger-model]').textContent = isRule ? '内置引擎' : label;
 
     const urlLow = elUrl.value.trim().toLowerCase();
     $$('[data-eff-preset]').forEach(btn => {
       const pid = btn.dataset.effPreset;
       const match =
-        (pid === 'rule' && prov === 'rule') ||
+        (pid === 'rule' && isRule) ||
+        (pid === 'local_cli' && isLocalCli) ||
         (pid === 'ollama' && prov === 'ollama') ||
         (pid === 'claude' && prov === 'anthropic') ||
         (pid === 'deepseek' && prov === 'openai' && urlLow.includes('deepseek')) ||
@@ -361,13 +435,30 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
       btn.setAttribute('aria-pressed', String(match));
     });
 
-    saveCfg({ provider: prov, base_url: elUrl.value.trim(), model: elModel.value.trim(), effort: currentEffort().id });
+    saveCfg({ provider: prov, cli_tool: cliTool, base_url: elUrl.value.trim(), model: elModel.value.trim(), effort: currentEffort().id });
+  }
+
+  function triggerMaxBurst() {
+    clearTimeout(maxBurstTimer);
+    elPopover.classList.remove('is-max-burst');
+    elBolt.classList.remove('is-burst');
+    elMaxWave?.classList.remove('is-wave');
+    elPopover.offsetWidth; // restart crisp studio prismatic overdrive burst
+    elPopover.classList.add('is-max-burst');
+    elBolt.classList.add('is-burst');
+    elMaxWave?.classList.add('is-wave');
+    maxBurstTimer = setTimeout(() => {
+      elPopover.classList.remove('is-max-burst');
+      elBolt.classList.remove('is-burst');
+      elMaxWave?.classList.remove('is-wave');
+    }, 740);
   }
 
   function updateEffortChrome(nextIdx, prevIdx = nextIdx) {
     effortIdx = nextIdx;
     const eff = currentEffort();
     elPopover.dataset.level = String(effortIdx);
+    elComposerWrap.dataset.effortLevel = String(effortIdx);
     btnTrigger.dataset.level = String(effortIdx);
     elBolt.dataset.level = String(effortIdx);
     elTrack.setAttribute('aria-valuenow', String(effortIdx));
@@ -390,13 +481,16 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     saveCfg({ effort: eff.id });
   }
 
-  // Mount the 2nd-order spring physics capsule slider
+  // Mount the 2nd-order high-stiffness spring capsule slider (+ Max overdrive burst)
   const effortSlider = mountEffortSlider(elTrack, {
     levels: EFFORT_LEVELS.length,
     initialIndex: effortIdx,
     onChange(nextIdx) {
       const prev = effortIdx;
       updateEffortChrome(nextIdx, prev);
+    },
+    onMaxHit() {
+      triggerMaxBurst();
     },
   });
 
@@ -527,11 +621,15 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     if (chatHistory.length > 14) chatHistory.splice(0, chatHistory.length - 14);
 
     chatBusy = true;
+    elComposerWrap.dataset.thinking = 'true';
     btnSend.disabled = true;
     const typingEl = document.createElement('div');
     typingEl.className = 'ait-msg';
     typingEl.dataset.role = 'assistant';
-    typingEl.innerHTML = `<div class="ait-msg-bubble"><span class="ait-typing"><i></i><i></i><i></i> 结合实时遥测分析中（${esc(currentEffort().label)}）…</span></div>`;
+    const busyHint = elProvider.value === 'local_cli'
+      ? `正在调用本机官方 AI（${esc(shortModelName())} · ${esc(currentEffort().label)}）…`
+      : `结合实时遥测分析中（${esc(currentEffort().label)}）…`;
+    typingEl.innerHTML = `<div class="ait-msg-bubble"><span class="ait-typing"><i></i><i></i><i></i> ${busyHint}</span></div>`;
     elFeed.append(typingEl);
     scrollChatToBottom();
 
@@ -550,6 +648,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
           loop: elLoop.value,
           dry_mode: elDry.checked,
           provider: elProvider.value,
+          cli_tool: cliTool,
           base_url: elUrl.value.trim(),
           model: elModel.value.trim(),
           api_key: elKey.value.trim(),
@@ -576,6 +675,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
       appendMessage({ role: 'assistant', kind: 'live-event', text: `对话请求失败：${e.message}` });
     } finally {
       chatBusy = false;
+      elComposerWrap.dataset.thinking = 'false';
       btnSend.disabled = false;
       elChatInput.focus();
     }
@@ -706,6 +806,11 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
       if (!r.ok) return;
       const snap = await r.json();
       lastSnap = snap;
+      if (Array.isArray(snap.local_clis) && snap.local_clis.length) {
+        localClis = snap.local_clis;
+        renderLocalCliChips();
+        syncProviderUI();
+      }
       const curStr = snap.current_parameters ? fmtParams(snap.current_parameters) : '未同步';
       $('[data-ait-cur-params]').textContent = `当前车端参数：${curStr}`;
       if (snap.tuner) {
@@ -744,7 +849,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     const eff = currentEffort();
     onFocusView?.(opt.view);
     setPopoverOpen(false);
-    saveCfg({ provider: elProvider.value, base_url: elUrl.value.trim(), model: elModel.value.trim(), goal: elGoal.value, effort: eff.id });
+    saveCfg({ provider: elProvider.value, cli_tool: cliTool, base_url: elUrl.value.trim(), model: elModel.value.trim(), goal: elGoal.value, effort: eff.id });
     busyAction = true;
     lastAnnouncedRound = 0;
     wasAutoActive = true;
@@ -756,6 +861,7 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
         body: JSON.stringify({
           loop: elLoop.value,
           provider: elProvider.value,
+          cli_tool: cliTool,
           base_url: elUrl.value.trim(),
           model: elModel.value.trim(),
           api_key: elKey.value.trim(),
@@ -908,6 +1014,13 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     elModel.value = preset.model;
     syncProviderUI();
   });
+  elCliChips.addEventListener('click', e => {
+    const btn = e.target.closest('[data-eff-cli]');
+    if (!btn) return;
+    cliTool = btn.dataset.effCli || 'auto';
+    renderLocalCliChips();
+    syncProviderUI();
+  });
 
   // Close popover when clicking outside or pressing Escape
   document.addEventListener('pointerdown', e => {
@@ -973,11 +1086,13 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
     }
   }
 
+  renderLocalCliChips();
   syncProviderUI();
   syncLoopUI(true);
   updateEffortChrome(effortIdx, effortIdx);
   appendWelcome();
   updateControls();
+  fetchLocalClis();
 
   return {
     isOpen: () => open,

@@ -285,6 +285,36 @@ class TestAITunerGuardrails(unittest.TestCase):
             tuner.session.stop()
             bridge.disconnect()
 
+    def test_detect_local_clis_and_fallback_error(self):
+        clis = ai_tuner.detect_local_clis()
+        self.assertEqual([c['id'] for c in clis], ['claude', 'codex', 'agy', 'gemini'])
+        for item in clis:
+            self.assertIn('label', item)
+            self.assertIn('available', item)
+            self.assertIsInstance(item['available'], bool)
+
+        # Requesting a non-existent CLI tool raises a clear RuntimeError without side effects
+        with self.assertRaises(RuntimeError):
+            ai_tuner.call_local_cli_text(
+                cli_tool='nonexistent_cli_tool',
+                model='',
+                reasoning_effort='fast',
+                system_prompt='test',
+                user_prompt='test',
+            )
+
+    def test_bridge_session_parses_gp1_and_wa1_amid_binary_camera_bytes(self):
+        bridge = serial_bridge.SerialBridge(serial_factory=DummyComSerial)
+        sess = ai_tuner.BridgeSession(bridge)
+        gp1_raw = demo_sim.sign_line('@GP1,1,7,4,2,3,125,150,90,300,4000,1,3800,1200,3800,1200,180000,1200,80,920,8500,6000,1,0,2000,1850,1')
+        wa1_raw = demo_sim.sign_line('@WA1,2,8,ykp,165000')
+        # Binary A5 5B camera packet glued immediately before @GP1 and @WA1 without newline
+        sess._feed_bytes(b'\xa5\x5b\x01\x01\x00\x01\x10\x00\x80\xff\x00\xfe' + gp1_raw)
+        self.assertIsNotNone(sess.gp1)
+        self.assertEqual(sess.gp1['rev'], 7)
+        sess._feed_bytes(b'\xa5\x5b\x01\x01\x00\x01\x10\x00\x80\xff\x00\xfe' + wa1_raw)
+        self.assertEqual(sess._last_ack, ('WA1', ['2', '8', 'ykp', '165000']))
+
 
 if __name__ == '__main__':
     unittest.main()

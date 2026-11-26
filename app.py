@@ -82,7 +82,14 @@ class AppServer(ThreadingHTTPServer):
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = 'TC264TunePro/1.3'
+    server_version = 'TC264TunePro/1.4'
+
+    def setup(self):
+        super().setup()
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
 
     def log_message(self, fmt, *args):
         pass
@@ -106,8 +113,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(size).decode('utf-8'))
 
-    def _stream_sse(self):
-        sub = serial_bridge.BRIDGE.subscribe()
+    def _stream_sse(self, control_only: bool = False):
+        sub = serial_bridge.BRIDGE.subscribe(include_data=not control_only)
         self.send_response(200)
         self._headers_common()
         self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -129,6 +136,38 @@ class AppHandler(BaseHTTPRequestHandler):
             pass
         finally:
             serial_bridge.BRIDGE.unsubscribe(sub)
+
+    def _stream_raw(self):
+        """Zero-Base64 raw binary octet stream for sub-millisecond camera & 50Hz telemetry delivery."""
+        sub = serial_bridge.BRIDGE.subscribe_raw()
+        self.send_response(200)
+        self._headers_common()
+        self.send_header('Content-Type', 'application/octet-stream')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        try:
+            self.wfile.flush()
+            while not SHUTDOWN_EV.is_set():
+                try:
+                    chunk = sub.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                # Drain any immediately queued chunks into a single write to minimize syscalls
+                if not sub.empty():
+                    buf = bytearray(chunk)
+                    while len(buf) < 65536:
+                        try:
+                            buf.extend(sub.get_nowait())
+                        except queue.Empty:
+                            break
+                    chunk = bytes(buf)
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        finally:
+            serial_bridge.BRIDGE.unsubscribe_raw(sub)
 
     def _stream_lifecycle(self):
         LIFECYCLE.connect()
@@ -154,7 +193,7 @@ class AppHandler(BaseHTTPRequestHandler):
             path = parsed.path
             qs = urllib.parse.parse_qs(parsed.query)
             if path == '/api/health':
-                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.3', 'demo': DEMO_MODE, 'ai_tuner': True, 'ai_chat': True})
+                return self._send_json({'ok': True, 'app': 'tc264-tunepro', 'version': '1.4', 'demo': DEMO_MODE, 'ai_tuner': True, 'ai_chat': True, 'raw_stream': True, 'local_cli': True})
             if path == '/api/serial/ports':
                 return self._send_json({
                     'ports': serial_bridge.list_serial_ports(include_demo=True, demo_first=DEMO_MODE),
@@ -164,9 +203,14 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == '/api/serial/status':
                 return self._send_json(serial_bridge.BRIDGE.status())
             if path == '/api/serial/stream':
-                return self._stream_sse()
+                control_only = ((qs.get('events') or [''])[0] == 'control')
+                return self._stream_sse(control_only=control_only)
+            if path == '/api/serial/raw-stream':
+                return self._stream_raw()
             if path == '/api/app/lifecycle':
                 return self._stream_lifecycle()
+            if path == '/api/ai/local-clis':
+                return self._send_json({'ok': True, 'clis': ai_tuner.detect_local_clis()})
             if path == '/api/ai/snapshot':
                 loop_id = (qs.get('loop') or [None])[0]
                 dry_mode = ((qs.get('dry') or ['0'])[0] in ('1', 'true', 'yes'))

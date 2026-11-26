@@ -22,8 +22,12 @@ from copy import deepcopy
 import json
 import math
 import os
+from pathlib import Path
 import queue
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -223,6 +227,189 @@ REASONING_LEVELS: dict[str, dict[str, Any]] = {
 def normalize_effort(val: Any) -> str:
     key = str(val or 'medium').strip().lower()
     return key if key in REASONING_LEVELS else 'medium'
+
+
+def _find_cli_binary(tool: str) -> str | None:
+    """Locate an officially installed local AI CLI using PATH and standard install locations."""
+    home = Path.home()
+    appdata = Path(os.environ.get('APPDATA') or (home / 'AppData' / 'Roaming'))
+    localapp = Path(os.environ.get('LOCALAPPDATA') or (home / 'AppData' / 'Local'))
+
+    candidates_map: dict[str, list[str | Path]] = {
+        'claude': [
+            'claude',
+            appdata / 'npm' / 'claude.cmd',
+            home / '.local' / 'bin' / 'claude.exe',
+            home / '.local' / 'bin' / 'claude',
+        ],
+        'codex': [
+            'codex',
+            appdata / 'npm' / 'codex.cmd',
+            home / '.codex' / '.sandbox-bin' / 'codex.exe',
+            home / '.local' / 'bin' / 'codex.exe',
+            home / '.local' / 'bin' / 'codex',
+        ],
+        'agy': [
+            'agy',
+            appdata / 'npm' / 'agy.cmd',
+            home / '.gemini' / 'antigravity-cli' / 'bin' / 'agy.exe',
+            home / '.gemini' / 'antigravity-cli' / 'bin' / 'agy',
+            localapp / 'Programs' / 'antigravity' / 'bin' / 'agy.cmd',
+            home / '.local' / 'bin' / 'agy',
+        ],
+        'gemini': [
+            'gemini',
+            appdata / 'npm' / 'gemini.cmd',
+            home / '.local' / 'bin' / 'gemini.exe',
+            home / '.local' / 'bin' / 'gemini',
+        ],
+    }
+    for cand in candidates_map.get(tool, []):
+        if isinstance(cand, str):
+            hit = shutil.which(cand)
+            if hit:
+                return hit
+        elif cand.is_file():
+            return str(cand)
+    return None
+
+
+def detect_local_clis() -> list[dict[str, Any]]:
+    """Probe installed official local AI CLIs (uses the user's own official account quota)."""
+    specs = [
+        ('claude', 'Claude Code', '本机已登录 Claude 官方额度'),
+        ('codex', 'Codex CLI', '本机已登录 OpenAI / Codex 官方额度'),
+        ('agy', 'Antigravity (agy)', '本机已登录 Google Antigravity 官方额度'),
+        ('gemini', 'Gemini CLI', '本机已登录 Google Gemini 官方额度'),
+    ]
+    out: list[dict[str, Any]] = []
+    for tool_id, label, desc in specs:
+        path = _find_cli_binary(tool_id)
+        out.append({
+            'id': tool_id,
+            'label': label,
+            'desc': desc,
+            'available': bool(path),
+            'path': path or '',
+        })
+    return out
+
+
+def call_local_cli_text(
+    *,
+    cli_tool: str,
+    model: str,
+    reasoning_effort: str,
+    system_prompt: str,
+    user_prompt: str,
+    timeout_s: float = 90.0,
+) -> tuple[str, str]:
+    """Invoke a locally installed, officially authenticated AI CLI non-interactively."""
+    eff_key = normalize_effort(reasoning_effort)
+    detected = detect_local_clis()
+    avail = {item['id']: item for item in detected if item['available']}
+
+    wanted = str(cli_tool or 'auto').strip().lower()
+    if wanted in ('', 'auto'):
+        chosen_id = next((t for t in ('claude', 'codex', 'agy', 'gemini') if t in avail), '')
+    elif wanted in avail:
+        chosen_id = wanted
+    else:
+        chosen_id = ''
+
+    if not chosen_id:
+        raise RuntimeError('未检测到可用的本机官方 AI CLI（请确认已安装并登录 claude / codex / agy / gemini）。')
+
+    exe = avail[chosen_id]['path']
+    full_prompt = f'{system_prompt}\n\n{user_prompt}'
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    env = dict(os.environ)
+    env.setdefault('NO_COLOR', '1')
+
+    def _run_cmd(cmd: list[str], stdin_text: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            cmd,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=timeout_s,
+            creationflags=creationflags,
+            env=env,
+        )
+
+    if chosen_id == 'claude':
+        effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}
+        cmd = [
+            exe, '-p',
+            '--output-format', 'text',
+            '--no-session-persistence',
+            '--tools', '',
+            '--effort', effort_map[eff_key],
+        ]
+        if model:
+            cmd.extend(['--model', model])
+        proc = _run_cmd(cmd, full_prompt)
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or '').strip()[:180]
+            raise RuntimeError(f'Claude Code 返回错误 ({proc.returncode})：{err}')
+        text = (proc.stdout or '').strip()
+        return text, f'Claude Code ({model or "官方默认"})'
+
+    if chosen_id == 'codex':
+        effort_map = {'fast': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'xhigh'}
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix='tunepro_codex_', suffix='.txt', delete=False) as tf:
+                tmp_path = tf.name
+            cmd = [
+                exe, 'exec',
+                '--ephemeral',
+                '--skip-git-repo-check',
+                '--sandbox', 'read-only',
+                '--color', 'never',
+                '-o', tmp_path,
+                '-c', f'model_reasoning_effort="{effort_map[eff_key]}"',
+            ]
+            if model:
+                cmd.extend(['-m', model])
+            cmd.append('-')
+            proc = _run_cmd(cmd, full_prompt)
+            out_txt = ''
+            if tmp_path and Path(tmp_path).is_file():
+                out_txt = Path(tmp_path).read_text(encoding='utf-8', errors='replace').strip()
+            if proc.returncode != 0 and not out_txt:
+                err = (proc.stderr or proc.stdout or '').strip()[:180]
+                raise RuntimeError(f'Codex CLI 返回错误 ({proc.returncode})：{err}')
+            text = out_txt or (proc.stdout or '').strip()
+            return text, f'Codex ({model or "官方默认"})'
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    if chosen_id == 'agy':
+        cmd = [exe, '-p', full_prompt]
+        if model:
+            cmd.extend(['--model', model])
+        proc = _run_cmd(cmd, '')
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or '').strip()[:180]
+            raise RuntimeError(f'Antigravity CLI 返回错误 ({proc.returncode})：{err}')
+        return (proc.stdout or '').strip(), f'Antigravity ({model or "官方默认"})'
+
+    # gemini CLI
+    cmd = [exe, '-p', '']
+    if model:
+        cmd.extend(['-m', model])
+    proc = _run_cmd(cmd, full_prompt)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or '').strip()[:180]
+        raise RuntimeError(f'Gemini CLI 返回错误 ({proc.returncode})：{err}')
+    return (proc.stdout or '').strip(), f'Gemini CLI ({model or "官方默认"})'
 
 
 def _finite_float(val: Any, name: str) -> float:
@@ -959,6 +1146,7 @@ def call_llm_proposal(
     goal: str,
     user_note: str,
     reasoning_effort: str = 'medium',
+    cli_tool: str = 'auto',
     timeout_s: float = 25.0,
 ) -> dict[str, Any]:
     """Request next bounded parameter proposal from OpenAI-compatible, Ollama, or Anthropic API."""
@@ -1009,56 +1197,66 @@ def call_llm_proposal(
     user_prompt = '当前实测数据如下，请输出下一轮 JSON 调参建议：\n' + json.dumps(user_payload, ensure_ascii=False)
 
     prov = provider.strip().lower()
-    url = base_url.strip().rstrip('/')
-    headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.1'}
-
-    if prov == 'anthropic':
-        endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
-        headers['x-api-key'] = api_key
-        headers['anthropic-version'] = '2023-06-01'
-        body = {
-            'model': model or 'claude-3-5-sonnet-latest',
-            'max_tokens': 400,
-            'temperature': 0.2,
-            'system': system_prompt,
-            'messages': [{'role': 'user', 'content': user_prompt}],
-        }
+    if prov == 'local_cli':
+        text, _used_lbl = call_local_cli_text(
+            cli_tool=cli_tool,
+            model=model,
+            reasoning_effort=eff_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            timeout_s=max(timeout_s, 75.0),
+        )
     else:
-        # OpenAI-compatible (OpenAI, DeepSeek, Qwen, OpenRouter, vLLM, Ollama /v1)
-        if prov == 'ollama' and not url:
-            url = 'http://127.0.0.1:11434/v1'
-        if not url:
-            url = 'https://api.openai.com/v1'
-        endpoint = url if url.endswith('/chat/completions') else f'{url}/chat/completions'
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-        body = {
-            'model': model or ('qwen2.5:7b' if prov == 'ollama' else 'gpt-4o-mini'),
-            'temperature': 0.2,
-            'max_tokens': 400,
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_prompt},
-            ],
-        }
+        url = base_url.strip().rstrip('/')
+        headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.4'}
 
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
-        headers=headers,
-        method='POST',
-    )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        raw_resp = resp.read().decode('utf-8', errors='replace')
-    parsed_resp = json.loads(raw_resp)
+        if prov == 'anthropic':
+            endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
+            headers['x-api-key'] = api_key
+            headers['anthropic-version'] = '2023-06-01'
+            body = {
+                'model': model or 'claude-3-5-sonnet-latest',
+                'max_tokens': eff_cfg['max_tokens'],
+                'temperature': eff_cfg['temp'],
+                'system': system_prompt,
+                'messages': [{'role': 'user', 'content': user_prompt}],
+            }
+        else:
+            # OpenAI-compatible (OpenAI, DeepSeek, Qwen, OpenRouter, vLLM, Ollama /v1)
+            if prov == 'ollama' and not url:
+                url = 'http://127.0.0.1:11434/v1'
+            if not url:
+                url = 'https://api.openai.com/v1'
+            endpoint = url if url.endswith('/chat/completions') else f'{url}/chat/completions'
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+            body = {
+                'model': model or ('qwen2.5:7b' if prov == 'ollama' else 'gpt-4o-mini'),
+                'temperature': eff_cfg['temp'],
+                'max_tokens': eff_cfg['max_tokens'],
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+            }
 
-    if prov == 'anthropic':
-        blocks = parsed_resp.get('content', [])
-        text = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
-    else:
-        choices = parsed_resp.get('choices') or []
-        msg = choices[0].get('message', {}) if choices else {}
-        text = str(msg.get('content') or '')
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
+            headers=headers,
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw_resp = resp.read().decode('utf-8', errors='replace')
+        parsed_resp = json.loads(raw_resp)
+
+        if prov == 'anthropic':
+            blocks = parsed_resp.get('content', [])
+            text = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
+        else:
+            choices = parsed_resp.get('choices') or []
+            msg = choices[0].get('message', {}) if choices else {}
+            text = str(msg.get('content') or '')
 
     obj = extract_json_object(text)
     if not obj or not isinstance(obj.get('parameters'), dict):
@@ -1221,6 +1419,7 @@ def call_llm_chat(
     best: dict[str, Any] | None,
     bounds: dict[str, dict[str, float]],
     dry_mode: bool,
+    cli_tool: str = 'auto',
     timeout_s: float = 28.0,
 ) -> dict[str, Any]:
     """Conversational AI tuning copilot via stdlib urllib.request (OpenAI/Ollama/Anthropic)."""
@@ -1263,58 +1462,72 @@ def call_llm_chat(
     })
 
     prov = provider.strip().lower()
-    url = base_url.strip().rstrip('/')
-    headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.3'}
-
-    if prov == 'anthropic':
-        endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
-        headers['x-api-key'] = api_key
-        headers['anthropic-version'] = '2023-06-01'
-        used_model = model or 'claude-3-5-sonnet-latest'
-        body: dict[str, Any] = {
-            'model': used_model,
-            'max_tokens': eff_cfg['max_tokens'],
-            'temperature': eff_cfg['temp'],
-            'system': system_prompt,
-            'messages': msgs,
-        }
+    if prov == 'local_cli':
+        hist_lines = []
+        for item in msgs[:-1]:
+            tag = '助手' if item['role'] == 'assistant' else '用户'
+            hist_lines.append(f'{tag}: {item["content"]}')
+        convo_prefix = ('【历史对话】\n' + '\n'.join(hist_lines) + '\n\n') if hist_lines else ''
+        text, used_model = call_local_cli_text(
+            cli_tool=cli_tool,
+            model=model,
+            reasoning_effort=eff_key,
+            system_prompt=system_prompt,
+            user_prompt=convo_prefix + msgs[-1]['content'],
+            timeout_s=max(timeout_s, 90.0),
+        )
     else:
-        if prov == 'ollama' and not url:
-            url = 'http://127.0.0.1:11434/v1'
-        if not url:
-            url = 'https://api.openai.com/v1'
-        endpoint = url if url.endswith('/chat/completions') else f'{url}/chat/completions'
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-        used_model = model or ('qwen2.5:7b' if prov == 'ollama' else 'gpt-4o-mini')
-        body = {
-            'model': used_model,
-            'temperature': eff_cfg['temp'],
-            'max_tokens': eff_cfg['max_tokens'],
-            'messages': [{'role': 'system', 'content': system_prompt}, *msgs],
-        }
-        # Pass reasoning_effort cleanly for compatible OpenAI reasoning models
-        low_m = used_model.lower()
-        if prov == 'openai' and any(tok in low_m for tok in ('o1', 'o3', 'o4', 'gpt-5', 'gpt-6', 'reasoner')):
-            body['reasoning_effort'] = 'high' if eff_key == 'max' else ('low' if eff_key == 'fast' else eff_key)
+        url = base_url.strip().rstrip('/')
+        headers = {'Content-Type': 'application/json', 'User-Agent': 'TunePro-AI/1.4'}
 
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
-        headers=headers,
-        method='POST',
-    )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        raw = resp.read().decode('utf-8', errors='replace')
-    parsed = json.loads(raw)
+        if prov == 'anthropic':
+            endpoint = url if url.endswith('/messages') else f'{url or "https://api.anthropic.com/v1"}/messages'
+            headers['x-api-key'] = api_key
+            headers['anthropic-version'] = '2023-06-01'
+            used_model = model or 'claude-3-5-sonnet-latest'
+            body: dict[str, Any] = {
+                'model': used_model,
+                'max_tokens': eff_cfg['max_tokens'],
+                'temperature': eff_cfg['temp'],
+                'system': system_prompt,
+                'messages': msgs,
+            }
+        else:
+            if prov == 'ollama' and not url:
+                url = 'http://127.0.0.1:11434/v1'
+            if not url:
+                url = 'https://api.openai.com/v1'
+            endpoint = url if url.endswith('/chat/completions') else f'{url}/chat/completions'
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+            used_model = model or ('qwen2.5:7b' if prov == 'ollama' else 'gpt-4o-mini')
+            body = {
+                'model': used_model,
+                'temperature': eff_cfg['temp'],
+                'max_tokens': eff_cfg['max_tokens'],
+                'messages': [{'role': 'system', 'content': system_prompt}, *msgs],
+            }
+            low_m = used_model.lower()
+            if prov == 'openai' and any(tok in low_m for tok in ('o1', 'o3', 'o4', 'gpt-5', 'gpt-6', 'reasoner')):
+                body['reasoning_effort'] = 'high' if eff_key == 'max' else ('low' if eff_key == 'fast' else eff_key)
 
-    if prov == 'anthropic':
-        blocks = parsed.get('content', [])
-        text = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
-    else:
-        choices = parsed.get('choices') or []
-        msg_obj = choices[0].get('message', {}) if choices else {}
-        text = str(msg_obj.get('content') or '')
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
+            headers=headers,
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode('utf-8', errors='replace')
+        parsed = json.loads(raw)
+
+        if prov == 'anthropic':
+            blocks = parsed.get('content', [])
+            text = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text')
+        else:
+            choices = parsed.get('choices') or []
+            msg_obj = choices[0].get('message', {}) if choices else {}
+            text = str(msg_obj.get('content') or '')
 
     obj = extract_json_object(text)
     if obj and isinstance(obj.get('reply'), str):
@@ -1346,6 +1559,9 @@ def call_llm_chat(
         'guardrail_notes': notes,
         'loop': loop_id,
     }
+
+
+_PRO_REPLY_RE = re.compile(rb'@(?:GP1|WA1|QX1|RA1),[^\r\n@*]+\*[0-9A-Fa-f]{4}')
 
 
 class BridgeSession:
@@ -1388,7 +1604,8 @@ class BridgeSession:
         with self._lock:
             if self._sub_q is not None:
                 return
-            self._sub_q = self.bridge.subscribe()
+            self._sub_q = self.bridge.subscribe_raw()
+            self._ctl_q = self.bridge.subscribe(include_data=False)
             self._stop_ev.clear()
             self._reader_thread = threading.Thread(target=self._drain_loop, name='ai-bridge-tap', daemon=True)
             self._reader_thread.start()
@@ -1397,11 +1614,15 @@ class BridgeSession:
         self._stop_ev.set()
         with self._lock:
             sub = self._sub_q
+            ctl = getattr(self, '_ctl_q', None)
             self._sub_q = None
+            self._ctl_q = None
             thr = self._reader_thread
             self._reader_thread = None
         if sub is not None:
-            self.bridge.unsubscribe(sub)
+            self.bridge.unsubscribe_raw(sub)
+        if ctl is not None:
+            self.bridge.unsubscribe(ctl)
         if thr is not None and thr.is_alive() and thr is not threading.current_thread():
             thr.join(timeout=1.0)
 
@@ -1413,37 +1634,42 @@ class BridgeSession:
     def _drain_loop(self) -> None:
         while not self._stop_ev.is_set():
             sub = self._sub_q
+            ctl = getattr(self, '_ctl_q', None)
             if sub is None:
                 break
+            if ctl is not None:
+                while True:
+                    try:
+                        ev, payload = ctl.get_nowait()
+                        if ev == 'status' and not payload.get('connected'):
+                            with self._lock:
+                                self.running = False
+                                self._stop_seen_ev.set()
+                    except queue.Empty:
+                        break
             try:
-                ev, payload = sub.get(timeout=0.05)
+                chunk = sub.get(timeout=0.05)
             except queue.Empty:
                 continue
-            if ev == 'data':
-                b64 = payload.get('b64', '')
-                if b64:
-                    try:
-                        self._feed_bytes(base64.b64decode(b64))
-                    except Exception:
-                        pass
-            elif ev == 'status':
-                if not payload.get('connected'):
-                    with self._lock:
-                        self.running = False
-                        self._stop_seen_ev.set()
+            if chunk:
+                self._feed_bytes(chunk)
 
     def _feed_bytes(self, data: bytes) -> None:
-        for b in data:
-            if b in (0x0A, 0x0D):
-                if self._line_buf:
-                    raw_line = bytes(self._line_buf)
-                    self._line_buf.clear()
-                    self._handle_line(raw_line)
-            else:
-                if len(self._line_buf) < 4096:
-                    self._line_buf.append(b)
-                else:
-                    self._line_buf.clear()
+        # Fast-path C-level split by newline; preserves trailing partial ASCII replies even under 100+ FPS binary camera streams
+        if b'\n' not in data and b'\r' not in data:
+            self._line_buf.extend(data)
+            if len(self._line_buf) > 4096:
+                del self._line_buf[:-512]
+            return
+        buf = bytes(self._line_buf) + data
+        self._line_buf.clear()
+        parts = buf.replace(b'\r', b'\n').split(b'\n')
+        tail = parts.pop()
+        if tail:
+            self._line_buf.extend(tail[-512:] if len(tail) > 4096 else tail)
+        for raw_line in parts:
+            if raw_line:
+                self._handle_line(raw_line)
 
     def _handle_line(self, raw_line: bytes) -> None:
         # Fast-path @M2 binary-adjacent ASCII frame
@@ -1456,16 +1682,56 @@ class BridgeSession:
                         self.running = bool(row['launch'] == 1)
                         if self._m2_recording:
                             self._m2_rows.append(row)
-                    return
+
+        # Signed protocol replies (@GP1, @WA1, @QX1, @RA1) — extract cleanly even if preceded by binary A5 5B camera slices
+        if b'@' in raw_line and b'*' in raw_line:
+            matched_pro = False
+            for pm in _PRO_REPLY_RE.finditer(raw_line):
+                matched_pro = True
+                body = demo_sim.verify_signed(pm.group(0).decode('ascii', errors='ignore'))
+                if body is None:
+                    continue
+                if body.startswith('@GP1,'):
+                    gp1 = parse_gp1_line(body)
+                    if gp1 is not None:
+                        with self._lock:
+                            self.gp1 = gp1
+                            self._gp1_ev.set()
+                elif body.startswith('@WA1,'):
+                    parts = body.split(',')
+                    with self._lock:
+                        self._last_ack = ('WA1', parts[1:])
+                        self._ack_ev.set()
+                elif body.startswith('@QX1,'):
+                    parts = body.split(',')
+                    with self._lock:
+                        self._last_ack = ('QX1', parts[1:])
+                        self.last_error = parts[3] if len(parts) > 3 else 'ERR'
+                        self._ack_ev.set()
+                elif body.startswith('@RA1,'):
+                    parts = body.split(',')
+                    sub = parts[1] if len(parts) > 1 else ''
+                    with self._lock:
+                        if sub == 'STOP':
+                            self.running = False
+                            self.stop_reason = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                            self._stop_seen_ev.set()
+                        elif sub in ('GO', 'RUN'):
+                            self.running = True
+                            self._last_ack = ('RA1', parts[1:])
+                            self._ack_ev.set()
+            if matched_pro and b'[tune2]' not in raw_line and b'vbat_mv=' not in raw_line:
+                return
 
         text = raw_line.decode('latin1', errors='ignore').strip()
         if not text:
             return
 
-        # [tune2] onboard 4 ms capture parser
-        if text.startswith('[tune2] cap begin'):
+        # [tune2] onboard 4 ms capture parser (tolerant of leading binary bytes)
+        cap_b = text.find('[tune2] cap begin')
+        if cap_b >= 0:
             hdr: dict[str, Any] = {}
-            for tok in text.split()[3:]:
+            for tok in text[cap_b:].split()[3:]:
                 if '=' in tok:
                     k, v = tok.split('=', 1)
                     try:
@@ -1478,8 +1744,9 @@ class BridgeSession:
                 self._cap_rows = []
             return
         if self._cap_active:
-            if text.startswith('u2,'):
-                parts = text.split(',')
+            u2_i = text.find('u2,')
+            if u2_i >= 0:
+                parts = text[u2_i:].split(',')
                 if len(parts) >= 11:
                     try:
                         row = {
@@ -1499,7 +1766,7 @@ class BridgeSession:
                     except ValueError:
                         pass
                 return
-            if text.startswith('[tune2] cap end'):
+            if '[tune2] cap end' in text:
                 with self._lock:
                     self._cap_active = False
                     self._last_capture = {
@@ -1508,47 +1775,6 @@ class BridgeSession:
                     }
                     self._cap_ev.set()
                 return
-
-        # Signed protocol replies (@GP1, @WA1, @QX1, @RA1)
-        if text.startswith('@'):
-            idx = text.rfind('*')
-            if idx > 0:
-                body = demo_sim.verify_signed(text)
-                if body is None:
-                    return
-                if body.startswith('@GP1,'):
-                    gp1 = parse_gp1_line(body)
-                    if gp1 is not None:
-                        with self._lock:
-                            self.gp1 = gp1
-                            self._gp1_ev.set()
-                    return
-                if body.startswith('@WA1,'):
-                    parts = body.split(',')
-                    with self._lock:
-                        self._last_ack = ('WA1', parts[1:])
-                        self._ack_ev.set()
-                    return
-                if body.startswith('@QX1,'):
-                    parts = body.split(',')
-                    with self._lock:
-                        self._last_ack = ('QX1', parts[1:])
-                        self.last_error = parts[3] if len(parts) > 3 else 'ERR'
-                        self._ack_ev.set()
-                    return
-                if body.startswith('@RA1,'):
-                    parts = body.split(',')
-                    sub = parts[1] if len(parts) > 1 else ''
-                    with self._lock:
-                        if sub == 'STOP':
-                            self.running = False
-                            self.stop_reason = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-                            self._stop_seen_ev.set()
-                        elif sub in ('GO', 'RUN'):
-                            self.running = True
-                            self._last_ack = ('RA1', parts[1:])
-                            self._ack_ev.set()
-                    return
 
         # Status line (4 Hz): t=... vbat_mv=... running=... stop=...
         if 'vbat_mv=' in text:
@@ -1828,6 +2054,7 @@ class AITunerManager:
             ],
             'current_parameters': cur_params,
             'bounds': bounds,
+            'local_clis': detect_local_clis(),
             'tuner': state_copy,
         }
 
@@ -1954,7 +2181,7 @@ class AITunerManager:
         if loop_id not in LOOP_PROFILES:
             raise ValueError(f'不支持的整定环路：{loop_id}')
         provider = str(cfg.get('provider') or 'rule').strip().lower()
-        if provider not in ('rule', 'openai', 'ollama', 'anthropic'):
+        if provider not in ('rule', 'local_cli', 'openai', 'ollama', 'anthropic'):
             raise ValueError(f'不支持的模型通道：{provider}')
 
         dry_mode = bool(cfg.get('dry_mode', False))
@@ -1987,6 +2214,7 @@ class AITunerManager:
         run_cfg = {
             'loop': loop_id,
             'provider': provider,
+            'cli_tool': str(cfg.get('cli_tool') or 'auto').strip().lower(),
             'base_url': str(cfg.get('base_url') or '').strip(),
             'model': str(cfg.get('model') or '').strip(),
             'api_key': api_key.strip(),
@@ -2175,6 +2403,7 @@ class AITunerManager:
                             goal=cfg['goal'],
                             user_note=cfg['user_note'],
                             reasoning_effort=cfg.get('reasoning_effort', 'medium'),
+                            cli_tool=cfg.get('cli_tool', 'auto'),
                         )
                     except Exception as exc:
                         fallback_note = f'LLM 调用失败（{str(exc)[:80]}），已切保守规则兜底。'
@@ -2233,8 +2462,9 @@ class AITunerManager:
         if loop_id not in LOOP_PROFILES:
             loop_id = 'yaw_2s1p'
         provider = str(cfg.get('provider') or 'rule').strip().lower()
-        if provider not in ('rule', 'openai', 'ollama', 'anthropic'):
+        if provider not in ('rule', 'local_cli', 'openai', 'ollama', 'anthropic'):
             provider = 'rule'
+        cli_tool = str(cfg.get('cli_tool') or 'auto').strip().lower()
         effort = normalize_effort(cfg.get('reasoning_effort'))
         dry_mode = bool(cfg.get('dry_mode', False))
         bounds = get_loop_bounds(loop_id, dry_mode=dry_mode)
@@ -2289,6 +2519,7 @@ class AITunerManager:
                 best=best,
                 bounds=bounds,
                 dry_mode=dry_mode,
+                cli_tool=cli_tool,
             )
         except Exception as exc:
             fallback = _build_offline_chat_reply(

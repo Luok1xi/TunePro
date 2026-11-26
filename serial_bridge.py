@@ -43,12 +43,24 @@ DEFAULT_LOG_ROOT = Path(os.environ.get('TUNEPRO_LOG_DIR') or (_default_app_root(
 ALLOWED_BAUDS = {9600, 115200, 230400, 460800, 921600, 2000000, 3000000}
 
 
-def _crc16(b: bytes) -> int:
-    c = 0xFFFF
-    for ch in b:
-        c ^= ch << 8
+def _build_crc16_table() -> tuple[int, ...]:
+    tbl = []
+    for i in range(256):
+        c = i << 8
         for _ in range(8):
             c = ((c << 1) ^ 0x1021) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+        tbl.append(c)
+    return tuple(tbl)
+
+
+_CRC16_TABLE = _build_crc16_table()
+
+
+def _crc16(b: bytes) -> int:
+    c = 0xFFFF
+    tbl = _CRC16_TABLE
+    for ch in b:
+        c = ((c << 8) & 0xFFFF) ^ tbl[((c >> 8) ^ ch) & 0xFF]
     return c
 
 
@@ -229,7 +241,7 @@ if os.name == 'nt':
 class WinSerialPort:
     """Zero-dependency Win32 serial port wrapper."""
 
-    def __init__(self, port: str, baud: int = 115200, timeout_ms: int = 40):
+    def __init__(self, port: str, baud: int = 115200, timeout_ms: int = 8):
         if os.name != 'nt':
             raise OSError('WinSerialPort 仅支持 Windows；Linux/macOS 请使用 MOCK0 或安装 pyserial。')
         self.port = port.upper()
@@ -250,7 +262,7 @@ class WinSerialPort:
         self.h = h
         self._wlock = threading.Lock()
         try:
-            _kernel32.SetupComm(h, 65536, 8192)
+            _kernel32.SetupComm(h, 131072, 16384)
             dcb = _DCB()
             dcb.DCBlength = ctypes.sizeof(_DCB)
             if not _kernel32.GetCommState(h, ctypes.byref(dcb)):
@@ -262,7 +274,7 @@ class WinSerialPort:
             dcb.fBits = 0x00000001  # fBinary=1, no flow control
             if not _kernel32.SetCommState(h, ctypes.byref(dcb)):
                 raise OSError(f'SetCommState 失败: err={ctypes.get_last_error()}')
-            to = _COMMTIMEOUTS(10, 0, timeout_ms, 0, 200)
+            to = _COMMTIMEOUTS(2, 0, timeout_ms, 0, 200)
             if not _kernel32.SetCommTimeouts(h, ctypes.byref(to)):
                 raise OSError(f'SetCommTimeouts 失败: err={ctypes.get_last_error()}')
             _kernel32.PurgeComm(h, _PURGE_RXCLEAR | _PURGE_TXCLEAR)
@@ -401,6 +413,8 @@ class SerialBridge:
         self._stop_ev = threading.Event()
         self._thread: threading.Thread | None = None
         self._clients: set[queue.Queue] = set()
+        self._control_clients: set[queue.Queue] = set()
+        self._raw_clients: set[queue.Queue] = set()
         self.port_name = ''
         self.baud = 115200
         self.connected = False
@@ -425,7 +439,7 @@ class SerialBridge:
                 'baud': self.baud,
                 'auto_reconnect': self.auto_reconnect,
                 'auto_log': self.auto_log,
-                'clients': len(self._clients),
+                'clients': len(self._clients) + len(self._raw_clients),
                 'rx_bytes': self.rx_bytes,
                 'tx_bytes': self.tx_bytes,
                 'last_error': self.last_error,
@@ -433,19 +447,52 @@ class SerialBridge:
                 'log_dir': str(self._logger.base_dir),
             }
 
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, *, include_data: bool = True) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=256)
         with self._lock:
-            self._clients.add(q)
+            if include_data:
+                self._clients.add(q)
+            else:
+                self._control_clients.add(q)
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
             self._clients.discard(q)
+            self._control_clients.discard(q)
+
+    def subscribe_raw(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=512)
+        with self._lock:
+            self._raw_clients.add(q)
+        return q
+
+    def unsubscribe_raw(self, q: queue.Queue) -> None:
+        with self._lock:
+            self._raw_clients.discard(q)
+
+    def _broadcast_raw(self, chunk: bytes) -> None:
+        with self._lock:
+            raw_targets = list(self._raw_clients)
+            has_sse_data = bool(self._clients)
+        for q in raw_targets:
+            try:
+                q.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(chunk)
+                except queue.Empty:
+                    pass
+        if has_sse_data:
+            self._broadcast('data', {'b64': base64.b64encode(chunk).decode('ascii'), 'n': len(chunk)})
 
     def _broadcast(self, event: str, payload: dict) -> None:
         with self._lock:
-            targets = list(self._clients)
+            if event == 'data':
+                targets = list(self._clients)
+            else:
+                targets = list(self._clients) + list(self._control_clients)
         for q in targets:
             try:
                 q.put_nowait((event, payload))
@@ -562,7 +609,7 @@ class SerialBridge:
                         self.last_error = str(exc)
                 continue
             try:
-                chunk = ser.read(8192)
+                chunk = ser.read(16384)
             except Exception as exc:
                 if self._stop_ev.is_set():
                     break
@@ -582,13 +629,13 @@ class SerialBridge:
             if chunk:
                 with self._lock:
                     self.rx_bytes += len(chunk)
-                self._broadcast('data', {'b64': base64.b64encode(chunk).decode('ascii'), 'n': len(chunk)})
+                self._broadcast_raw(chunk)
             if auto_log:
                 saved = self._logger.feed(chunk)
                 if saved:
                     self._broadcast('saved', {'path': saved})
             if not chunk:
-                time.sleep(0.008)
+                time.sleep(0.0015)
 
 
 BRIDGE = SerialBridge()

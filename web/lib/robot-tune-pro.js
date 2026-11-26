@@ -49,7 +49,9 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
   let pingTimer = 0;
   let pendingTimer = 0;
   let imgMode = 0;
-  let imgFps = 6;
+  let imgFps = 0;
+  const parseImgFps = v => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0; };
+  const fmtImgFps = f => (f === 0 ? '无上限' : `${f} fps`);
   let lastReply = '连接串口后自动同步参数；勾选「解锁远程发车」后，点任意速度/角速度预设或输「B 140」「W 300」即可持续运转，运行中拖滑条无扰热生效！';
   let writeQueue = [];
   let flushing = false;
@@ -81,7 +83,7 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
         <button type="button" data-rtp-img="3" aria-pressed="false" disabled title="47×30 8位灰度压缩，无线约 6 FPS">灰47</button>
       </div>
       <select data-rtp-img-fps aria-label="图传帧率" disabled>
-        ${[2, 4, 6, 10, 15].map(f => `<option value="${f}"${f === 6 ? ' selected' : ''}>${f} fps</option>`).join('')}
+        ${[0, 60, 30, 15, 10, 6].map(f => `<option value="${f}"${f === 0 ? ' selected' : ''}>${f === 0 ? '无上限' : `${f} fps`}</option>`).join('')}
       </select>
     </div>`;
 
@@ -524,8 +526,17 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
     setIfIdle('[data-rtp-field="fan_pct_yaw"]', fanPct);
     setIfIdle('[data-rtp-field="fan_pct_outer"]', fanPct);
     imgMode = p.img_mode;
-    imgFps = p.img_fps || 6;
-    $('[data-rtp-img-fps]').value = String(imgFps);
+    imgFps = parseImgFps(p.img_fps);
+    const fpsSel = $('[data-rtp-img-fps]');
+    if (fpsSel) {
+      if (![...fpsSel.options].some(o => Number(o.value) === imgFps)) {
+        const opt = document.createElement('option');
+        opt.value = String(imgFps);
+        opt.textContent = fmtImgFps(imgFps);
+        fpsSel.append(opt);
+      }
+      fpsSel.value = String(imgFps);
+    }
 
     const viewVals = {
       ...p,
@@ -840,10 +851,10 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
     if (b.hasAttribute('data-rtp-go')) { remoteLaunch(); return; }
     if (d.rtpImg !== undefined) {
       imgMode = Number(d.rtpImg);
-      imgFps = Number($('[data-rtp-img-fps]').value) || 6;
+      imgFps = parseImgFps($('[data-rtp-img-fps]').value);
       updateUI();
       await sendRaw(commands.proImg(imgMode, imgFps), { paced: true });
-      setBanner(imgMode ? `已开启实时压缩图传（模式 ${imgMode} · ${imgFps} fps）` : '已关闭实时图传', 'info');
+      setBanner(imgMode ? `已开启实时压缩图传（模式 ${imgMode} · ${fmtImgFps(imgFps)}）` : '已关闭实时图传', 'info');
       return;
     }
     if (d.rtpWheel !== undefined) {
@@ -962,7 +973,7 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
     on(camStreamHost, 'change', e => {
       const t = e.target;
       if (t.matches('[data-rtp-img-fps]') && imgMode > 0) {
-        imgFps = Number(t.value) || 6;
+        imgFps = parseImgFps(t.value);
         sendRaw(commands.proImg(imgMode, imgFps), { paced: true });
       }
     });
@@ -999,7 +1010,7 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
       liveTimers.delete(t.dataset.rtpSlider);
       sendSingleGain(t.dataset.rtpSlider);
     } else if (t.matches('[data-rtp-img-fps]') && imgMode > 0) {
-      imgFps = Number(t.value) || 6;
+      imgFps = parseImgFps(t.value);
       sendRaw(commands.proImg(imgMode, imgFps), { paced: true });
     }
   });
@@ -1089,8 +1100,8 @@ export function mountTunePro(host, { stageHost = null, camStreamHost = null, isC
         } else if (ev.action === 'TGT') {
           setBanner(`运行中目标已无缝切换为 ${ev.a}`, 'good');
         } else if (ev.action === 'IMG') {
-          imgMode = ev.a; imgFps = ev.b;
-          setBanner(imgMode ? `车端已开启实时压缩图传（模式 ${imgMode} · ${imgFps} fps）` : '车端已关闭实时图传', 'good');
+          imgMode = ev.a; imgFps = parseImgFps(ev.b);
+          setBanner(imgMode ? `车端已开启实时压缩图传（模式 ${imgMode} · ${fmtImgFps(imgFps)}）` : '车端已关闭实时图传', 'good');
         }
         updateUI();
       } else if (ev.type === 'pro-error') {

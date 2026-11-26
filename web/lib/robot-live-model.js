@@ -27,11 +27,21 @@ const bytesOf = cols => cols.reduce((n, [, c]) => n + SIZE[c], 0);
 export const TLM_LAYOUTS = new Map([[1, TLM_V1.slice(0, -4)], [1, TLM_V1], [2, TLM_V2], [0x82, BB_HEADER], [0x83, BB_END]].map(([v, cols]) => [`${v}:${bytesOf(cols)}`, cols]));
 export const TLM_FLAGS = { sample_present: 1, sample_fresh: 2, route_available: 4, numeric_saturated: 8, vbat_valid: 16 };
 
-// CRC-16/CCITT-FALSE（多项式 0x1021、初值 0xFFFF；"123456789" 的校验值是 0x29B1）
+// CRC-16/CCITT-FALSE 查表加速（多项式 0x1021、初值 0xFFFF；"123456789" 的校验值是 0x29B1）
+const CRC16_TABLE = (() => {
+  const t = new Uint16Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i << 8;
+    for (let k = 0; k < 8; k++) c = (c & 0x8000) ? (((c << 1) ^ 0x1021) & 0xffff) : ((c << 1) & 0xffff);
+    t[i] = c;
+  }
+  return t;
+})();
+const LATIN1_DECODER = new TextDecoder('latin1');
+
 export function crc16(bytes, crc = 0xffff) {
-  for (const b of bytes) {
-    crc ^= b << 8;
-    for (let k = 0; k < 8; k++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = ((crc << 8) & 0xffff) ^ CRC16_TABLE[((crc >> 8) ^ bytes[i]) & 0xff];
   }
   return crc;
 }
@@ -406,7 +416,7 @@ export function createLiveParser(onEvent) {
   const flushLine = () => {
     if (droppingLine) { droppingLine = false; return; }
     // 半个调参包（抓取开始时截断的）会粘在行首：去掉不可打印字节；状态行从 "t=" 起算
-    let text = new TextDecoder('latin1').decode(Uint8Array.from(line)).replace(/[^\x20-\x7e]/g, '').trim();
+    let text = LATIN1_DECODER.decode(Uint8Array.from(line)).replace(/[^\x20-\x7e]/g, '').trim();
     line = [];
     const at = text.search(/t=\d+ vbat_mv=|@(?:M2|GP1|WA1|RA1|QX1),/);
     if (at > 0) text = text.slice(at);
@@ -516,7 +526,15 @@ export function createLiveParser(onEvent) {
   };
   return push;
   function push(chunk) {
-    if (chunk?.length) { const next = new Uint8Array(buf.length + chunk.length); next.set(buf); next.set(chunk, buf.length); buf = next; }
+    if (chunk?.length) {
+      if (!buf.length) buf = chunk;
+      else {
+        const next = new Uint8Array(buf.length + chunk.length);
+        next.set(buf);
+        next.set(chunk, buf.length);
+        buf = next;
+      }
+    }
     for (;;) {
       if (skipDots) {
         skipDots -= take(Math.min(skipDots, buf.length)).length;
@@ -640,7 +658,7 @@ export const commands = {
   proEmergencyStop: () => '#!',
   proPing: () => signCommand('#X PING'),
   proTarget: val => Number.isInteger(val) && val >= -600 && val <= 600 ? signCommand(`#X TGT ${val}`) : null,
-  proImg: (mode, fps = 6) => Number.isInteger(mode) && mode >= 0 && mode <= 3 && Number.isInteger(fps) && fps >= 1 && fps <= 15
+  proImg: (mode, fps = 6) => Number.isInteger(mode) && mode >= 0 && mode <= 3 && Number.isInteger(fps) && fps >= 0 && fps <= 120
     ? signCommand(`#X IMG ${mode} ${fps}`) : null,
   proCapture: () => signCommand('#X CAP'),
 };

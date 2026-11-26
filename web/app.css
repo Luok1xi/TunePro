@@ -107,10 +107,11 @@ button:active:not(:disabled) { transform: scale(0.968); }
   pointer-events: none;
   will-change: transform, width;
   transition:
-    transform 165ms var(--spring-snappy),
-    width 165ms var(--spring-snappy),
-    opacity 100ms var(--ease-out),
-    background 130ms var(--ease-out);
+    transform 210ms var(--spring-snappy),
+    width 210ms var(--spring-snappy),
+    opacity 110ms var(--ease-out),
+    background 160ms var(--ease-out),
+    box-shadow 180ms var(--ease-out);
 }
 .tp-fluid-line > .tp-fluid-ind {
   bottom: -1px;
@@ -155,7 +156,7 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
 
 /* Crisp instant panel reveal on tab switch */
 @keyframes tp-pane-in {
-  from { opacity: 0; transform: translate3d(0, 4px, 0); }
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
   to { opacity: 1; transform: translate3d(0, 0, 0); }
 }
 
@@ -365,7 +366,7 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
   white-space: nowrap;
 }
 .tp-topo-tabs button:hover { color: var(--c-fg); }
-.tp-topo-tabs button[aria-pressed="true"] { color: var(--c-fg); font-weight: 600; }
+.tp-topo-tabs button[aria-pressed="true"] { color: var(--c-fg); text-shadow: 0 0 0.35px currentColor; }
 
 /* Inline Glass Connection Capsule */
 .tp-conn-capsule {
@@ -822,7 +823,7 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
 .tp-line-tabs button:hover { color: var(--c-fg); }
 .tp-line-tabs button[aria-pressed="true"] {
   color: var(--c-fg);
-  font-weight: 600;
+  text-shadow: 0 0 0.35px currentColor;
 }
 .tp-line-tabs button[aria-pressed="true"]::after {
   content: "";
@@ -1162,6 +1163,7 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   overscroll-behavior: contain;
   padding: 13px 16px 18px;
   scrollbar-width: thin;
@@ -1180,7 +1182,7 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
 .rtp-tab-panel {
   display: grid;
   gap: 12px;
-  animation: tp-pane-in 110ms var(--ease-out) both;
+  animation: tp-pane-in 155ms var(--ease-out) both;
 }
 .rtp-pid-box {
   padding-left: 10px;
@@ -1329,7 +1331,7 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
 .rtp-loop-tabs button:hover { color: var(--c-fg); }
 .rtp-loop-tabs button[aria-selected="true"] {
   color: var(--c-fg);
-  font-weight: 600;
+  text-shadow: 0 0 0.35px currentColor;
 }
 .rtp-loop-tabs button[aria-selected="true"]::after {
   content: "";
@@ -1981,12 +1983,13 @@ html[data-theme="light"] .tp-fluid-pill > .tp-fluid-ind {
   40% { opacity: 1; transform: scale(1.12); }
 }
 
-/* ---------- Bottom Chat Composer + Gemini-Style Top Diffused Horizon Glow ---------- */
+/* ---------- Eye-Level Top Chat Composer + Gemini-Style Top Diffused Horizon Glow ---------- */
 .ait-composer-wrap {
   position: relative;
   isolation: isolate;
   flex: none;
-  padding-top: 10px;
+  padding-top: 8px;
+  z-index: 25;
 }
 
 /* Soft upward-diffused atmospheric light radiating from the top arch of the composer */
@@ -2213,11 +2216,12 @@ html[data-theme="light"] .ait-composer-glow::before {
 .ait-send-btn:hover:not(:disabled) { transform: scale(1.06); }
 .ait-send-btn svg { width: 15px; height: 15px; }
 
-/* ---------- Floating Frosted Glass Reasoning Effort & Model Popover ---------- */
+/* ---------- Floating Frosted Glass Reasoning Effort & Model Popover (Opens Downward from Top Composer) ---------- */
 .eff-popover {
   position: absolute;
   right: 0;
-  bottom: calc(100% + 10px);
+  top: calc(100% + 9px);
+  bottom: auto;
   width: min(334px, 100%);
   overflow: hidden;
   padding: 15px 16px 14px;
@@ -2230,12 +2234,12 @@ html[data-theme="light"] .ait-composer-glow::before {
     inset 0 0 0 1px var(--glass-rim-edge),
     0 24px 54px -14px rgba(0, 0, 0, 0.42),
     0 6px 18px -6px rgba(0, 0, 0, 0.18);
-  z-index: 30;
+  z-index: 35;
   display: grid;
   gap: 13px;
-  transform-origin: bottom right;
+  transform-origin: top right;
   opacity: 0;
-  transform: translate3d(0, 8px, 0) scale(0.94);
+  transform: translate3d(0, -8px, 0) scale(0.94);
   pointer-events: none;
   transition:
     opacity 95ms var(--ease-out),

@@ -119,10 +119,13 @@ export function mountFluidTabs(container, { selector = 'button', activeSelector 
   container.prepend(ind);
 
   let ready = false;
+  let lastContainerW = 0;
+  let lastSwitchTs = 0;
   const sync = (instant = false) => {
     const active = container.querySelector(`${selector}:is(${activeSelector})`);
     if (!active || !active.offsetWidth) {
       ind.style.opacity = '0';
+      lastContainerW = container.clientWidth;
       return;
     }
     const x = active.offsetLeft;
@@ -136,19 +139,29 @@ export function mountFluidTabs(container, { selector = 'button', activeSelector 
       ind.style.transition = '';
       ready = true;
     } else {
+      lastSwitchTs = performance.now();
       ind.style.width = `${w}px`;
       ind.style.transform = `translate3d(${x}px, 0, 0)`;
       ind.style.opacity = '1';
     }
+    lastContainerW = container.clientWidth;
   };
 
-  const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => sync(true)) : null;
+  const ro = typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver(() => {
+        const curW = container.clientWidth;
+        const deltaW = Math.abs(curW - lastContainerW);
+        // Never kill an active tab-switch slide due to minor font-weight or scrollbar reflow
+        const majorResize = !ready || (deltaW > 24 && (performance.now() - lastSwitchTs) > 280);
+        sync(majorResize);
+      })
+    : null;
   ro?.observe(container);
   const mo = new MutationObserver(() => sync(false));
   mo.observe(container, { subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-pressed'] });
-  // Trigger same-frame indicator response on click so animation never trails fast clicks
-  container.addEventListener('click', () => sync(false));
-  document.fonts?.ready?.then(() => sync(true));
+  document.fonts?.ready?.then(() => {
+    if ((performance.now() - lastSwitchTs) > 280) sync(true);
+  });
   requestAnimationFrame(() => sync(true));
   return { sync };
 }

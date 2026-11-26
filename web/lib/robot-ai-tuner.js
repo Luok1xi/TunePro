@@ -135,75 +135,28 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
       AI 调参需通过「本机串口桥」控制与回读，请在顶栏切回本机串口桥。
     </div>
 
-    <!-- 紧凑任务控制条 -->
-    <div class="ait-ctrl-strip">
-      <div class="ait-ctrl-row">
-        <select data-ait-loop aria-label="整定环路">
-          ${LOOP_OPTIONS.map(o => `<option value="${o.id}">${esc(o.label)}</option>`).join('')}
-        </select>
-        <label class="ait-unit-lbl">目标 <input type="number" data-ait-target value="300" step="10"><span data-ait-unit>°/s</span></label>
-        <select data-ait-goal aria-label="偏好策略">
-          <option value="balanced">均衡策略</option>
-          <option value="fast_response">响应优先</option>
-          <option value="low_overshoot">低超调优先</option>
-          <option value="stability_first">稳健抗振</option>
-        </select>
-        <label class="ait-dry-chk" data-ait-dry-wrap title="两串一并角速度环专用：干地无负压时将 Kp 上限锁在 14.0">
-          <input type="checkbox" data-ait-dry> 干地限幅
-        </label>
-      </div>
-      <div class="ait-actions">
-        <button type="button" class="tp-btn-accent" data-ait-start disabled>自动调参</button>
-        <button type="button" data-ait-step disabled title="执行 1 趟 4 ms 阶跃基线测试，并把实时诊断结论发入对话">单步测基线</button>
-        <button type="button" data-ait-rollback disabled title="恢复并回读验证当前会话最佳稳定参数">恢复最佳</button>
-        <button type="button" class="ait-stop-btn" data-ait-stop disabled>急停</button>
-      </div>
-    </div>
-
-    <!-- 实车物理串口安全联锁（MOCK0 自动隐藏） -->
-    <div class="ait-realcar-gate" data-ait-realcar-gate hidden>
-      <label class="ait-gate-chk">
-        <input type="checkbox" data-ait-realcar-ok>
-        <span>实车安全联锁：已架空车轮、确认 3S ≥ 11.7V 且随时准备按 Esc 急停</span>
-      </label>
-    </div>
-
-    <!-- 紧凑历史最佳条（有最佳验证轮次时显示） -->
-    <div class="ait-best-mini" data-ait-best-mini hidden>
-      <span data-ait-best-params>—</span>
-      <b data-ait-best-metrics>—</b>
-    </div>
-
-    <!-- 可展开的详细轮次表抽屉 -->
-    <div class="ait-runs-drawer" data-ait-runs-drawer hidden>
-      <div class="ait-status-line" data-ait-msg>连接 MOCK0 虚拟小车或实车串口后即可实时对话或自动整定。</div>
-      <div class="ait-bounds-strip" data-ait-cur-params>当前车端参数：未同步</div>
-      <div class="ait-table-wrap">
-        <table class="ait-table">
-          <thead>
-            <tr>
-              <th>轮</th>
-              <th>参数</th>
-              <th>上升</th>
-              <th>超调</th>
-              <th>静差</th>
-              <th>状态</th>
-              <th>结论</th>
-            </tr>
-          </thead>
-          <tbody data-ait-tbody>
-            <tr><td colspan="7" class="ait-empty">暂无阶跃轮次。点击「单步测基线」或「自动调参」开始采集。</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 实时交互对话流 -->
-    <div class="ait-chat-feed" data-ait-chat-feed role="log" aria-live="polite"></div>
-
-    <!-- 底部玻璃输入框 + 推理强度/模型悬浮窗 -->
+    <!-- 顶部眼平位玻璃输入框（紧邻左侧实时波形与摄像头，边看图边指挥 AI）+ 向下展开的推理强度/模型浮层 -->
     <div class="ait-composer-wrap" data-ait-composer-wrap data-effort-level="${effortIdx}" data-thinking="false">
-      <!-- 悬浮毛玻璃推理强度与模型切换浮层 -->
+      <!-- Gemini 风格顶部散射光晕 + 聊天输入胶囊 -->
+      <div class="ait-composer-glow" aria-hidden="true"></div>
+      <div class="ait-composer">
+        <textarea data-ait-chat-input rows="2" placeholder="盯着左侧波形/画面直接指挥 AI，例如：入弯超调太大 / 响应偏慢…"></textarea>
+        <div class="ait-composer-bar">
+          <span class="ait-ctx-pill" data-ait-ctx-pill>已挂载实时遥测</span>
+          <div class="ait-composer-right">
+            <button type="button" class="eff-trigger" data-eff-trigger data-level="${effortIdx}" aria-expanded="false" title="选择模型与推理强度">
+              <span class="eff-trigger-bolt">${BOLT_SVG}</span>
+              <span data-eff-trigger-lvl>${EFFORT_LEVELS[effortIdx].label}</span>
+              <span class="eff-trigger-model" data-eff-trigger-model>内置引擎</span>
+            </button>
+            <button type="button" class="ait-send-btn" data-ait-send title="发送消息 (Enter)" aria-label="发送">
+              ${UP_SVG}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 悬浮毛玻璃推理强度与模型切换浮层（向下展开，完整呈现不被顶部裁切） -->
       <div class="eff-popover" data-eff-popover data-level="${effortIdx}" role="dialog" aria-label="选择推理强度与模型">
         <span class="eff-pop-prism" aria-hidden="true"><i></i></span>
         <div class="eff-pop-head">
@@ -278,26 +231,73 @@ export function mountAiTuner(host, { getTransport, isConnected, getLiveTelemetry
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- Gemini 风格顶部散射光晕 + 底部聊天输入胶囊 -->
-      <div class="ait-composer-glow" aria-hidden="true"></div>
-      <div class="ait-composer">
-        <textarea data-ait-chat-input rows="1" placeholder="描述波形现象或车体体感，例如：入弯超调太大 / 响应太慢…"></textarea>
-        <div class="ait-composer-bar">
-          <span class="ait-ctx-pill" data-ait-ctx-pill>已挂载实时遥测</span>
-          <div class="ait-composer-right">
-            <button type="button" class="eff-trigger" data-eff-trigger data-level="${effortIdx}" aria-expanded="false" title="选择模型与推理强度">
-              <span class="eff-trigger-bolt">${BOLT_SVG}</span>
-              <span data-eff-trigger-lvl>${EFFORT_LEVELS[effortIdx].label}</span>
-              <span class="eff-trigger-model" data-eff-trigger-model>内置引擎</span>
-            </button>
-            <button type="button" class="ait-send-btn" data-ait-send title="发送消息 (Enter)" aria-label="发送">
-              ${UP_SVG}
-            </button>
-          </div>
-        </div>
+    <!-- 紧凑任务控制条 -->
+    <div class="ait-ctrl-strip">
+      <div class="ait-ctrl-row">
+        <select data-ait-loop aria-label="整定环路">
+          ${LOOP_OPTIONS.map(o => `<option value="${o.id}">${esc(o.label)}</option>`).join('')}
+        </select>
+        <label class="ait-unit-lbl">目标 <input type="number" data-ait-target value="300" step="10"><span data-ait-unit>°/s</span></label>
+        <select data-ait-goal aria-label="偏好策略">
+          <option value="balanced">均衡策略</option>
+          <option value="fast_response">响应优先</option>
+          <option value="low_overshoot">低超调优先</option>
+          <option value="stability_first">稳健抗振</option>
+        </select>
+        <label class="ait-dry-chk" data-ait-dry-wrap title="两串一并角速度环专用：干地无负压时将 Kp 上限锁在 14.0">
+          <input type="checkbox" data-ait-dry> 干地限幅
+        </label>
+      </div>
+      <div class="ait-actions">
+        <button type="button" class="tp-btn-accent" data-ait-start disabled>自动调参</button>
+        <button type="button" data-ait-step disabled title="执行 1 趟 4 ms 阶跃基线测试，并把实时诊断结论发入对话">单步测基线</button>
+        <button type="button" data-ait-rollback disabled title="恢复并回读验证当前会话最佳稳定参数">恢复最佳</button>
+        <button type="button" class="ait-stop-btn" data-ait-stop disabled>急停</button>
       </div>
     </div>
+
+    <!-- 实车物理串口安全联锁（MOCK0 自动隐藏） -->
+    <div class="ait-realcar-gate" data-ait-realcar-gate hidden>
+      <label class="ait-gate-chk">
+        <input type="checkbox" data-ait-realcar-ok>
+        <span>实车安全联锁：已架空车轮、确认 3S ≥ 11.7V 且随时准备按 Esc 急停</span>
+      </label>
+    </div>
+
+    <!-- 紧凑历史最佳条（有最佳验证轮次时显示） -->
+    <div class="ait-best-mini" data-ait-best-mini hidden>
+      <span data-ait-best-params>—</span>
+      <b data-ait-best-metrics>—</b>
+    </div>
+
+    <!-- 可展开的详细轮次表抽屉 -->
+    <div class="ait-runs-drawer" data-ait-runs-drawer hidden>
+      <div class="ait-status-line" data-ait-msg>连接 MOCK0 虚拟小车或实车串口后即可实时对话或自动整定。</div>
+      <div class="ait-bounds-strip" data-ait-cur-params>当前车端参数：未同步</div>
+      <div class="ait-table-wrap">
+        <table class="ait-table">
+          <thead>
+            <tr>
+              <th>轮</th>
+              <th>参数</th>
+              <th>上升</th>
+              <th>超调</th>
+              <th>静差</th>
+              <th>状态</th>
+              <th>结论</th>
+            </tr>
+          </thead>
+          <tbody data-ait-tbody>
+            <tr><td colspan="7" class="ait-empty">暂无阶跃轮次。点击「单步测基线」或「自动调参」开始采集。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 实时交互对话流（紧跟输入框下方，新回复自动定位） -->
+    <div class="ait-chat-feed" data-ait-chat-feed role="log" aria-live="polite"></div>
   `;
 
   const $ = q => host.querySelector(q);

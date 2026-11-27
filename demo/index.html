@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TC264-TunePro · 浏览器在线调参演示台</title>
+<style>
+  :root { --bg:#0c1117; --card:#131b24; --line:#253344; --ink:#e6edf3; --muted:#8b9bb0; --cyan:#38bdf8; --emerald:#34d399; --amber:#fbbf24; --rose:#fb7185; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; font-size:13.5px; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:11px 18px; background:var(--card); border-bottom:1px solid var(--line); flex-wrap:wrap; gap:10px; }
+  .pill { font-size:11px; padding:3px 9px; border-radius:999px; background:rgba(56,189,248,.14); color:var(--cyan); border:1px solid rgba(56,189,248,.35); font-weight:600; }
+  .wrap { display:grid; grid-template-columns:300px 1fr 270px; gap:14px; padding:14px; max-width:1420px; margin:0 auto; }
+  @media(max-width:1020px){ .wrap{ grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:12px; }
+  h3 { margin:0 0 10px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+  label { color:#cbd5e1; font-size:12.5px; }
+  input[type=range] { width:100%; accent-color:var(--cyan); }
+  .val { font-family:Consolas,monospace; color:var(--cyan); font-weight:700; }
+  button { background:#1c2938; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:7px 11px; cursor:pointer; font-size:12.5px; }
+  button:hover { border-color:var(--cyan); }
+  button.go { background:#0284c7; border-color:#38bdf8; font-weight:700; }
+  button.stop { background:#9f1239; border-color:#fb7185; font-weight:700; }
+  button.active { background:rgba(56,189,248,.18); border-color:var(--cyan); color:var(--cyan); font-weight:700; }
+  canvas { width:100%; display:block; background:#080d12; border:1px solid var(--line); border-radius:8px; }
+  .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:10px; }
+  .m { background:#0e151d; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .m span { display:block; font-size:11px; color:var(--muted); }
+  .m b { font-family:Consolas,monospace; font-size:15px; color:var(--emerald); }
+  .log { font-family:Consolas,monospace; font-size:11.5px; color:#b8c7d9; max-height:170px; overflow:auto; line-height:1.55; }
+</style>
+</head>
+<body>
+<header>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <b style="font-size:16px;">TC264-TunePro</b>
+    <span class="pill">浏览器静态仿真演示 · MOCK0 物理模型</span>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button id="topo2s1p" class="active">两串一并 (2S1P)</button>
+    <button id="topo3c">传统三串 (3-Cascade)</button>
+    <button class="go" id="stepBtn">触发 +300 ↔ -300 °/s 阶跃</button>
+    <button class="stop" id="estopBtn">急停 (Esc)</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="card">
+      <h3>角速度内环实时热调参数</h3>
+      <div class="row"><label>角速度 Kp (直出 PWM)</label><span class="val" id="vKp">12.0</span></div>
+      <input type="range" id="kp" min="2" max="32" step="0.5" value="12.0">
+      <div class="row" style="margin-top:8px;"><label>角速度 Ki</label><span class="val" id="vKi">0.45</span></div>
+      <input type="range" id="ki" min="0" max="2.0" step="0.05" value="0.45">
+      <div class="row" style="margin-top:8px;"><label>前馈 Kff</label><span class="val" id="vKff">1.60</span></div>
+      <input type="range" id="kff" min="0" max="4.0" step="0.1" value="1.60">
+      <div class="row" style="margin-top:8px;"><label>纵向均速目标 (cm/s)</label><span class="val" id="vSpd">140</span></div>
+      <input type="range" id="spd" min="60" max="220" step="5" value="140">
+      <div style="display:flex;gap:6px;margin-top:10px;">
+        <button id="presetDry" style="flex:1;">干地预设 (6.5)</button>
+        <button id="presetFan" style="flex:1;">负压预设 (18.0)</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>AI 安全护栏闭环整定</h3>
+      <p style="margin:0 0 10px;color:var(--muted);font-size:12px;line-height:1.5;">
+        按当前 4 ms 阶跃上升时间与超调指标，在单步限幅（<code>max_step ≤ 2.5</code>）内自动提议并验证参数；若振荡加剧则自动回滚。
+      </p>
+      <button class="go" id="aiStepBtn" style="width:100%;">运行一轮 AI 循证调参</button>
+      <div class="log" id="aiLog" style="margin-top:10px;"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <div class="row" style="margin-bottom:6px;">
+        <h3 style="margin:0;">实时波形示波器（目标 vs 陀螺实测 + 共模/差模 PWM）</h3>
+        <span style="font-size:11.5px;color:var(--muted);">青线: 目标角速度 · 绿线: 实测陀螺 · 黄线: PWM_turn</span>
+      </div>
+      <canvas id="scope" width="760" height="310"></canvas>
+      <div class="metrics">
+        <div class="m"><span>10→90% 上升时间</span><b id="mRise">-- ms</b></div>
+        <div class="m"><span>阶跃超调量</span><b id="mOver">-- %</b></div>
+        <div class="m"><span>差模 PWM_turn 峰值</span><b id="mPwmT">--</b></div>
+        <div class="m"><span>PWM 饱和风险</span><b id="mSat">安全</b></div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h3>无线压缩图传预览 (A5 5B RLE)</h3>
+      <canvas id="cam" width="240" height="150"></canvas>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.5;">
+        模拟 188×120 二值 RLE 压缩帧叠画赛道边线、加权中线与前瞻偏差点。
+      </div>
+    </div>
+    <div class="card" style="font-size:12px;color:var(--muted);line-height:1.55;">
+      <b style="color:var(--ink);">完整版能力</b><br>
+      克隆仓库后执行 <code>python app.py --demo</code> 即可体验完整 Win32 串口桥、自动落盘 <code>./runs/</code>、WebSerial 直连与外部 Coding Agent Skill。
+    </div>
+  </div>
+</div>
+
+<script>
+let topo = "2s1p", estop = false, targetSign = 1, best = { kp: 12.0, score: 1e9 };
+const logEl = document.getElementById("aiLog");
+function addLog(msg) { logEl.innerHTML = `<div>${msg}</div>` + logEl.innerHTML; }
+
+function getParams() {
+  return {
+    kp: +document.getElementById("kp").value,
+    ki: +document.getElementById("ki").value,
+    kff: +document.getElementById("kff").value,
+    spd: +document.getElementById("spd").value
+  };
+}
+
+function simulate() {
+  const { kp, ki, kff, spd } = getParams();
+  document.getElementById("vKp").textContent = kp.toFixed(1);
+  document.getElementById("vKi").textContent = ki.toFixed(2);
+  document.getElementById("vKff").textContent = kff.toFixed(2);
+  document.getElementById("vSpd").textContent = spd;
+
+  const dt = 0.004, N = 220;
+  let w = 0, dw = 0, integ = 0, pwmDelay = [0, 0, 0];
+  const ref = [], meas = [], pwmT = [];
+  const pwmSpeed = spd * 24;
+  let maxPwmT = 0, satCount = 0;
+
+  for (let i = 0; i < N; i++) {
+    const r = estop ? 0 : (i < 25 ? 0 : (i < 125 ? 300 * targetSign : -300 * targetSign));
+    const err = r - w;
+    integ = Math.max(-400, Math.min(400, integ + err * dt));
+    let u = kff * 3.2 * r + kp * 1.4 * err + ki * 55 * integ;
+    const maxTurn = 6200;
+    if (Math.abs(u) + pwmSpeed > 8500) satCount++;
+    u = Math.max(-maxTurn, Math.min(maxTurn, u));
+    maxPwmT = Math.max(maxPwmT, Math.abs(u));
+
+    pwmDelay.push(u);
+    const applied = topo === "2s1p" ? pwmDelay.shift() : (pwmDelay.shift() * 0.78);
+    const plantLag = topo === "2s1p" ? 0.16 : 0.28;
+    const accel = (applied * 0.26 - w * 1.0 - dw * plantLag) * (topo === "2s1p" ? 30 : 18);
+    dw += accel * dt;
+    w += dw * dt * 0.55 + (applied * 0.22 - w) * dt * (topo === "2s1p" ? 16 : 9);
+    ref.push(r); meas.push(w); pwmT.push(u);
+  }
+
+  // Rise time & overshoot on first step (i=25..124)
+  const target = 300 * targetSign;
+  let t10 = -1, t90 = -1, peak = 0;
+  for (let i = 25; i < 125; i++) {
+    const prog = meas[i] * targetSign;
+    if (t10 < 0 && prog >= 30) t10 = i;
+    if (t90 < 0 && prog >= 270) t90 = i;
+    if (prog > peak) peak = prog;
+  }
+  const riseMs = (t10 >= 0 && t90 >= 0) ? (t90 - t10) * 4 : 999;
+  const overPct = estop ? 0 : Math.max(0, ((peak - 300) / 300) * 100);
+
+  document.getElementById("mRise").textContent = estop ? "STOP" : (riseMs >= 999 ? ">350 ms" : `${riseMs} ms`);
+  document.getElementById("mOver").textContent = `${overPct.toFixed(1)} %`;
+  document.getElementById("mOver").style.color = overPct > 18 ? "var(--rose)" : (overPct > 10 ? "var(--amber)" : "var(--emerald)");
+  document.getElementById("mPwmT").textContent = Math.round(maxPwmT);
+  document.getElementById("mSat").textContent = satCount > 12 ? `饱和 (${Math.round(satCount/N*100)}%)` : "安全";
+  document.getElementById("mSat").style.color = satCount > 12 ? "var(--rose)" : "var(--emerald)";
+
+  drawScope(ref, meas, pwmT);
+  drawCam(meas[80] || 0);
+  return { riseMs, overPct, satCount };
+}
+
+function drawScope(ref, meas, pwmT) {
+  const c = document.getElementById("scope"), ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = "#192431"; ctx.lineWidth = 1;
+  for (let y = 30; y < H; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  ctx.strokeStyle = "#2b3b4e"; ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke();
+
+  const plot = (arr, scale, color, dash) => {
+    ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 2; if (dash) ctx.setLineDash(dash);
+    ctx.beginPath();
+    arr.forEach((v, i) => {
+      const x = (i / (arr.length - 1)) * W;
+      const y = H / 2 - (v / scale) * (H * 0.42);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke(); ctx.restore();
+  };
+  plot(pwmT, 6500, "rgba(251,191,36,0.55)");
+  plot(ref, 450, "#38bdf8", [5, 4]);
+  plot(meas, 450, "#34d399");
+}
+
+function drawCam(yaw) {
+  const c = document.getElementById("cam"), ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.fillStyle = "#0a0f14"; ctx.fillRect(0, 0, W, H);
+  const bend = Math.max(-55, Math.min(55, yaw * 0.14));
+  ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(W*0.25, H); ctx.quadraticCurveTo(W*0.32, H*0.5, W*0.42 + bend, 12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W*0.75, H); ctx.quadraticCurveTo(W*0.68, H*0.5, W*0.58 + bend, 12); ctx.stroke();
+  ctx.strokeStyle = "#34d399"; ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(W*0.5, H); ctx.quadraticCurveTo(W*0.5, H*0.5, W*0.5 + bend, 12); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#fb7185"; ctx.beginPath(); ctx.arc(W*0.5 + bend*0.65, H*0.42, 4, 0, Math.PI*2); ctx.fill();
+}
+
+["kp","ki","kff","spd"].forEach(id => document.getElementById(id).oninput = () => { estop = false; simulate(); });
+document.getElementById("topo2s1p").onclick = () => { topo="2s1p"; topo2s1p.className="active"; topo3c.className=""; simulate(); };
+document.getElementById("topo3c").onclick = () => { topo="3c"; topo3c.className="active"; topo2s1p.className=""; simulate(); };
+document.getElementById("stepBtn").onclick = () => { estop=false; targetSign*=-1; simulate(); };
+document.getElementById("estopBtn").onclick = () => { estop=true; addLog("[ESTOP] 已直发 #! + #X STOP 优先急停"); simulate(); };
+window.addEventListener("keydown", e => { if (e.key === "Escape") document.getElementById("estopBtn").click(); });
+document.getElementById("presetDry").onclick = () => { estop=false; kp.value=6.5; kff.value=1.3; simulate(); };
+document.getElementById("presetFan").onclick = () => { estop=false; kp.value=18.0; kff.value=1.8; simulate(); };
+
+document.getElementById("aiStepBtn").onclick = () => {
+  estop = false;
+  const cur = simulate();
+  const score = cur.riseMs + cur.overPct * 6;
+  const kpEl = document.getElementById("kp");
+  const curKp = +kpEl.value;
+  if (score < best.score) best = { kp: curKp, score };
+  let delta = 0, reason = "";
+  if (cur.overPct > 14) { delta = -2.0; reason = `超调 ${cur.overPct.toFixed(1)}% 偏高 → 安全步长下调 Kp`; }
+  else if (cur.riseMs > 84) { delta = +2.0; reason = `上升 ${cur.riseMs}ms 偏慢 → 安全步长上调 Kp`; }
+  else { addLog(`[AI PASS] 已进入理想阻尼区间 (rise=${cur.riseMs}ms, over=${cur.overPct.toFixed(1)}%)`); return; }
+  const nextKp = Math.max(2, Math.min(32, curKp + delta));
+  kpEl.value = nextKp;
+  const after = simulate();
+  const afterScore = after.riseMs + after.overPct * 6;
+  if (afterScore > best.score + 35) {
+    kpEl.value = best.kp; simulate();
+    addLog(`[ROLLBACK] Kp=${nextKp.toFixed(1)} 指标恶化，已自动回滚至最佳 Kp=${best.kp.toFixed(1)}`);
+  } else {
+    addLog(`[WRITE+VERIFY] ${reason}: ${curKp.toFixed(1)} → ${nextKp.toFixed(1)} (rise=${after.riseMs}ms, over=${after.overPct.toFixed(1)}%)`);
+  }
+};
+
+addLog("[MOCK0] 虚拟差速小车已就绪，拖动滑条或点击 AI 整定开始体验。");
+simulate();
+</script>
+</body>
+</html>
